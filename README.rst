@@ -1,6 +1,9 @@
 `Mesa <https://mesa3d.org>`_ - The 3D Graphics Library
 ======================================================
 
+This is a stripped-down fork of Mesa, cut down to just the softpipe driver for
+learning purposes. Every other driver has been removed.
+
 
 Source
 ------
