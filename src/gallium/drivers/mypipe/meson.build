@@ -8,6 +8,17 @@ files_mypipe = files(
     'mp_texture.c',
     'mp_texture.h',
     'mp_public.h',
+    'mp_state.h',
+    'mp_state_blend.c',
+    'mp_state_clip.c',
+    'mp_state_rasterizer.c',
+    'mp_state_sampler.c',
+    'mp_state_shader.c',
+    'mp_state_streamout.c',
+    'mp_state_texture.c',
+    'mp_state_vertex.c',
+    'mp_state_image.c',
+    'mp_state_query.c',
 )
 
 libmypipe = static_library(

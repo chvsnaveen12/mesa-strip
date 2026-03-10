@@ -42,11 +42,10 @@ else
 endif
 subdir('winsys/sw/wrapper')
 
-# softpipe only
 if with_gallium_mypipe
   subdir('drivers/mypipe')
 else
-  driver_softpipe = declare_dependency()
+  driver_mypipe = declare_dependency()
 endif
 if with_gallium_softpipe
   subdir('drivers/softpipe')
@@ -57,13 +56,16 @@ endif
 # no llvmpipe
 driver_llvmpipe = declare_dependency()
 
-if with_gallium_mypipe
-  driver_swrast = driver_mypipe
-elif with_gallium_softpipe
-  driver_swrast = driver_softpipe
-else
-  driver_swrast = declare_dependency()
+_swrast_deps = []
+if with_gallium_softpipe
+  _swrast_deps += driver_softpipe
 endif
+if with_gallium_mypipe
+  _swrast_deps += driver_mypipe
+endif
+driver_swrast = declare_dependency(
+  dependencies : _swrast_deps,
+)
 
 # all hardware drivers disabled
 driver_asahi = declare_dependency()
