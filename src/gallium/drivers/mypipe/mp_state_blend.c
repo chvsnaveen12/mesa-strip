@@ -5,8 +5,9 @@
 
 static void *mypipe_create_blend_state(struct pipe_context *pipe,
                                        const struct pipe_blend_state *blend){
-    fprintf(stderr, "STUB: mypipe_create_blend_state\n");
-    return NULL;
+    fprintf(stderr, "STUB: mypipe_create_blend_state: rt0 blend_enable=%d rgb_func=%d\n",
+            blend->rt[0].blend_enable, blend->rt[0].rgb_func);
+    return (void*)(uintptr_t)1;
 }
 
 static void mypipe_bind_blend_state(struct pipe_context *pipe, void *blend){
@@ -24,8 +25,9 @@ static void mypipe_set_blend_color(struct pipe_context *pipe,
 
 static void *mypipe_create_depth_stencil_alpha_state(struct pipe_context *pipe,
                                                      const struct pipe_depth_stencil_alpha_state *templ){
-    fprintf(stderr, "STUB: mypipe_create_depth_stencil_alpha_state\n");
-    return NULL;
+    fprintf(stderr, "STUB: mypipe_create_depth_stencil_alpha_state: depth_enabled=%d depth_writemask=%d depth_func=%d\n",
+            templ->depth_enabled, templ->depth_writemask, templ->depth_func);
+    return (void*)(uintptr_t)1;
 }
 
 static void mypipe_bind_depth_stencil_alpha_state(struct pipe_context *pipe, void *depth_stencil){

@@ -11,7 +11,11 @@ static void mypipe_set_clip_state(struct pipe_context *pipe,
 static void mypipe_set_viewport_states(struct pipe_context *pipe,
                                        unsigned start_slot, unsigned num_viewports,
                                        const struct pipe_viewport_state *viewport){
-    fprintf(stderr, "STUB: mypipe_set_viewport_states\n");
+    for (unsigned i = 0; i < num_viewports; i++)
+        fprintf(stderr, "STUB: mypipe_set_viewport_states[%u]: scale=(%.1f,%.1f,%.1f) translate=(%.1f,%.1f,%.1f)\n",
+                start_slot + i,
+                viewport[i].scale[0], viewport[i].scale[1], viewport[i].scale[2],
+                viewport[i].translate[0], viewport[i].translate[1], viewport[i].translate[2]);
 }
 
 static void mypipe_set_scissor_states(struct pipe_context *pipe,

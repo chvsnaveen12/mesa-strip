@@ -19,6 +19,8 @@ files_mypipe = files(
     'mp_state_vertex.c',
     'mp_state_image.c',
     'mp_state_query.c',
+    'mp_flush.c',
+    'mp_flush.h',
 )
 
 libmypipe = static_library(

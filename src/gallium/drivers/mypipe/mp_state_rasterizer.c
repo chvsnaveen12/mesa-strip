@@ -5,8 +5,9 @@
 
 static void *mypipe_create_rasterizer_state(struct pipe_context *pipe,
                                             const struct pipe_rasterizer_state *rasterizer){
-    fprintf(stderr, "STUB: mypipe_create_rasterizer_state\n");
-    return NULL;
+    fprintf(stderr, "STUB: mypipe_create_rasterizer_state: fill_front=%d fill_back=%d cull_face=%d front_ccw=%d\n",
+            rasterizer->fill_front, rasterizer->fill_back, rasterizer->cull_face, rasterizer->front_ccw);
+    return (void*)(uintptr_t)1;
 }
 
 static void mypipe_bind_rasterizer_state(struct pipe_context *pipe, void *rasterizer){

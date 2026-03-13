@@ -57,7 +57,6 @@ static bool mypipe_is_format_supported(struct pipe_screen *screen,
                                        unsigned int sample_count,
                                        unsigned int storage_sample_count,
                                        unsigned int bind){
-    fprintf(stderr, "STUB: mypipe_is_format_supported\n");
     if(sample_count > 1)
         return false;
 
@@ -67,7 +66,9 @@ static bool mypipe_is_format_supported(struct pipe_screen *screen,
     if(bind & PIPE_BIND_RENDER_TARGET){
         switch (format){
             case PIPE_FORMAT_B8G8R8A8_UNORM:
+            case PIPE_FORMAT_B8G8R8X8_UNORM:
             case PIPE_FORMAT_R8G8B8A8_UNORM:
+            case PIPE_FORMAT_R8G8B8X8_UNORM:
                 return true;
             default:
                 return false;
@@ -83,7 +84,10 @@ static bool mypipe_is_format_supported(struct pipe_screen *screen,
     }
     if(bind & PIPE_BIND_SAMPLER_VIEW){
         switch (format){
+            case PIPE_FORMAT_B8G8R8A8_UNORM:
+            case PIPE_FORMAT_B8G8R8X8_UNORM:
             case PIPE_FORMAT_R8G8B8A8_UNORM:
+            case PIPE_FORMAT_R8G8B8X8_UNORM:
                 return true;
             default:
                 return false;
@@ -184,8 +188,15 @@ static void mypipe_flush_frontbuffer(struct pipe_screen * _screen,
                                      unsigned int level, unsigned int layer,
                                      void *context_private,
                                      unsigned nboxes, struct pipe_box *sub_box){
-    fprintf(stderr, "STUB: mypipe_flush_frontbuffer\n");
-    return;
+    fprintf(stderr, "STUB: mypipe_flush_frontbuffer: resource=%p format=%d %ux%u level=%u layer=%u\n",
+            (void*)resource, resource->format, resource->width0, resource->height0, level, layer);
+    struct mypipe_screen *screen = mypipe_screen(_screen);
+    struct sw_winsys *winsys = screen->winsys;
+    struct mypipe_resource *texture = mypipe_resource(resource);
+    assert(texture->dt);
+
+    if(texture->dt)
+        winsys->displaytarget_display(winsys, texture->dt, context_private, nboxes, sub_box);
 }
 
 static const nir_shader_compiler_options mp_compiler_options = {

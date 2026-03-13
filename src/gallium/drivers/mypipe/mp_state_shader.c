@@ -1,12 +1,18 @@
 #include <stdio.h>
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
+#include "compiler/nir/nir.h"
 #include "mp_state.h"
 
 static void *mypipe_create_fs_state(struct pipe_context *pipe,
                                     const struct pipe_shader_state *templ){
-    fprintf(stderr, "STUB: mypipe_create_fs_state\n");
-    return NULL;
+    fprintf(stderr, "=== mypipe_create_fs_state ===\n");
+    if (templ->type == PIPE_SHADER_IR_NIR && templ->ir.nir) {
+        nir_print_shader(templ->ir.nir, stderr);
+    } else {
+        fprintf(stderr, "  IR type: %d (not NIR)\n", templ->type);
+    }
+    return (void*)(uintptr_t)1; /* non-NULL dummy handle */
 }
 
 static void mypipe_bind_fs_state(struct pipe_context *pipe, void *fs){
@@ -19,8 +25,13 @@ static void mypipe_delete_fs_state(struct pipe_context *pipe, void *fs){
 
 static void *mypipe_create_vs_state(struct pipe_context *pipe,
                                     const struct pipe_shader_state *templ){
-    fprintf(stderr, "STUB: mypipe_create_vs_state\n");
-    return NULL;
+    fprintf(stderr, "=== mypipe_create_vs_state ===\n");
+    if (templ->type == PIPE_SHADER_IR_NIR && templ->ir.nir) {
+        nir_print_shader(templ->ir.nir, stderr);
+    } else {
+        fprintf(stderr, "  IR type: %d (not NIR)\n", templ->type);
+    }
+    return (void*)(uintptr_t)2; /* non-NULL dummy handle */
 }
 
 static void mypipe_bind_vs_state(struct pipe_context *pipe, void *vs){
