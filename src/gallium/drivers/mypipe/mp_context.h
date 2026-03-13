@@ -11,9 +11,9 @@ struct mp_vertex_element_state {
     struct pipe_vertex_element elements[MP_MAX_ATTRIBS];
 };
 
-struct mp_compiled_shader {
-    nir_shader *nir;
-};
+// struct mp_compiled_shader {
+//     nir_shader *nir;
+// };
 
 struct mypipe_context {
     struct pipe_context pipe;
