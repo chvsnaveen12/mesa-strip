@@ -2,30 +2,40 @@
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
 #include "mp_state.h"
+#include "mp_context.h"
 
 static void *mypipe_create_vertex_elements_state(struct pipe_context *pipe,
                                                  unsigned num_elements,
                                                  const struct pipe_vertex_element *attribs){
     fprintf(stderr, "STUB: mypipe_create_vertex_elements_state: num_elements=%u\n", num_elements);
     for (unsigned i = 0; i < num_elements; i++)
-        fprintf(stderr, "  elem[%u]: src_offset=%u src_format=%d vertex_buffer_index=%u\n",
-                i, attribs[i].src_offset, attribs[i].src_format, attribs[i].vertex_buffer_index);
-    return (void*)(uintptr_t)(num_elements + 1); /* non-NULL dummy */
+        fprintf(stderr, "  elem[%u]: src_offset=%u src_stride=%u src_format=%d vertex_buffer_index=%u\n",
+                i, attribs[i].src_offset, attribs[i].src_stride, attribs[i].src_format, attribs[i].vertex_buffer_index);
+
+    struct mp_vertex_element_state *state = CALLOC_STRUCT(mp_vertex_element_state);
+    state->num_elements = num_elements;
+    memcpy(state->elements, attribs, num_elements * sizeof(*attribs));
+    
+    return (void *)state;
 }
 
 static void mypipe_bind_vertex_elements_state(struct pipe_context *pipe, void *velems){
     fprintf(stderr, "STUB: mypipe_bind_vertex_elements_state\n");
+    mypipe_context(pipe)->velems = velems;
 }
 
 static void mypipe_delete_vertex_elements_state(struct pipe_context *pipe, void *velems){
     fprintf(stderr, "STUB: mypipe_delete_vertex_elements_state\n");
+    FREE(velems);
 }
 
 static void mypipe_set_vertex_buffers(struct pipe_context *pipe,
                                       unsigned count,
                                       const struct pipe_vertex_buffer *buffers){
     fprintf(stderr, "STUB: mypipe_set_vertex_buffers: count=%u\n", count);
+    struct mypipe_context *mypipe = mypipe_context(pipe);
     if (buffers) {
+        memcpy(mypipe->vertex_buffers, buffers, count * sizeof(*buffers));
         for (unsigned i = 0; i < count; i++)
             fprintf(stderr, "  vb[%u]: offset=%u buffer=%p is_user=%d\n",
                     i, buffers[i].buffer_offset, (void*)buffers[i].buffer.resource, buffers[i].is_user_buffer);

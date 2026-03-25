@@ -11,7 +11,6 @@
 #include "util/u_transfer.h"
 #include "util/u_surface.h"
 
-
 #include "frontend/sw_winsys.h"
 
 unsigned mypipe_get_tex_image_offset(const struct mypipe_resource *mpr, unsigned level, unsigned layer){
@@ -26,17 +25,11 @@ static void *mypipe_transfer_map(struct pipe_context *pipe,
                                unsigned usage,
                                const struct pipe_box *box,
                                struct pipe_transfer **transfer){
-    fprintf(stderr, "STUB: mypipe_buffer_map\n");
-    struct sw_winsys *winsys = mypipe_screen(pipe->screen)->winsys;
     struct mypipe_resource *mpr = mypipe_resource(resource);
     struct mypipe_transfer *mpt;
     struct pipe_transfer *pt;
-    enum pipe_format format = resource->format;
     uint8_t *map;
 
-    // FIXME: A BUNCH OF ASSERTS
-
-    // What's even the point of this??!!?!?!
     if(!(usage & PIPE_MAP_UNSYNCHRONIZED)){
         bool read_only = !(usage & PIPE_MAP_WRITE);
         bool do_not_block = !!(usage & PIPE_MAP_DONTBLOCK);
@@ -45,7 +38,7 @@ static void *mypipe_transfer_map(struct pipe_context *pipe,
             return NULL;
         }
     }
-    
+
     mpt = CALLOC_STRUCT(mypipe_transfer);
 
     if(!mpt)
@@ -61,11 +54,12 @@ static void *mypipe_transfer_map(struct pipe_context *pipe,
 
     mpt->offset = mypipe_get_tex_image_offset(mpr, level, box->z);
 
-    if(mpr->dt)
-        map = winsys->displaytarget_map(winsys, mpr->dt, usage);
-    else
-        map = mpr->data;
-    
+    /* For buffers, box->x is the byte offset into the buffer */
+    if (resource->target == PIPE_BUFFER)
+        mpt->offset += box->x;
+
+    map = mpr->data;
+
     if(!map){
         pipe_resource_reference(&pt->resource, NULL);
         FREE(mpt);
@@ -77,8 +71,6 @@ static void *mypipe_transfer_map(struct pipe_context *pipe,
 
 static void mypipe_transfer_unmap(struct pipe_context *pipe,
                                 struct pipe_transfer *transfer){
-    fprintf(stderr, "STUB: mypipe_buffer_unmap\n");
-
     struct mypipe_resource *mpr;
 
     assert(transfer->resource);
@@ -102,19 +94,62 @@ static void *mypipe_texture_map(struct pipe_context *pipe,
                                 unsigned usage,
                                 const struct pipe_box *box,
                                 struct pipe_transfer **out_transfer){
-    fprintf(stderr, "STUB: mypipe_texture_map\n");
-    return NULL;
+    struct mypipe_resource *mpr = mypipe_resource(resource);
+    struct mypipe_transfer *mpt;
+    struct pipe_transfer *pt;
+    uint8_t *map;
+
+    mpt = CALLOC_STRUCT(mypipe_transfer);
+    if (!mpt)
+        return NULL;
+
+    pt = &mpt->base;
+    pipe_resource_reference(&pt->resource, resource);
+    pt->level = level;
+    pt->usage = usage;
+    pt->box = *box;
+    pt->stride = mpr->stride[level];
+    pt->layer_stride = mpr->img_stride[level];
+
+    unsigned offset = mypipe_get_tex_image_offset(mpr, level, box->z);
+
+    /* Add sub-offset for x,y within the image */
+    enum pipe_format format = resource->format;
+    unsigned bpp = util_format_get_blocksize(format);
+    offset += box->y * pt->stride + box->x * bpp;
+
+    mpt->offset = offset;
+
+    /* Always use shadow buffer (mpr->data) for rendering and readback.
+     * Display target is only written during flush_frontbuffer. */
+    map = mpr->data;
+
+    if (!map) {
+        pipe_resource_reference(&pt->resource, NULL);
+        FREE(mpt);
+        return NULL;
+    }
+    *out_transfer = pt;
+    return map + mpt->offset;
 }
 
 static void mypipe_texture_unmap(struct pipe_context *pipe,
                                  struct pipe_transfer *transfer){
-    fprintf(stderr, "STUB: mypipe_texture_unmap\n");
+    struct mypipe_resource *mpr;
+
+    assert(transfer->resource);
+    mpr = mypipe_resource(transfer->resource);
+
+    if (transfer->usage & PIPE_MAP_WRITE)
+        mpr->timestamp++;
+
+    pipe_resource_reference(&transfer->resource, NULL);
+    FREE(transfer);
 }
 
 static void mypipe_transfer_flush_region(struct pipe_context *pipe,
                                          struct pipe_transfer *transfer,
                                          const struct pipe_box *box){
-    fprintf(stderr, "STUB: mypipe_transfer_flush_region\n");
 }
 
 static void mypipe_buffer_subdata(struct pipe_context *pipe,
@@ -123,9 +158,6 @@ static void mypipe_buffer_subdata(struct pipe_context *pipe,
                                   unsigned offset,
                                   unsigned size,
                                   const void *data){
-    fprintf(stderr, "STUB: mypipe_buffer_subdata: offset=%u size=%u data=%p resource_width=%u\n",
-            offset, size, data, resource->width0);
-
     struct pipe_transfer *transfer = NULL;
     struct pipe_box box;
 
@@ -136,7 +168,7 @@ static void mypipe_buffer_subdata(struct pipe_context *pipe,
         if(offset == 0 && size == resource->width0){
             usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
         }
-        else    
+        else
             usage |= PIPE_MAP_DISCARD_RANGE;
     }
 
@@ -158,14 +190,26 @@ static void mypipe_texture_subdata(struct pipe_context *pipe,
                                    const void *data,
                                    unsigned stride,
                                    uintptr_t layer_stride){
-    fprintf(stderr, "STUB: mypipe_texture_subdata\n");
+    struct pipe_transfer *transfer = NULL;
+
+    usage |= PIPE_MAP_WRITE;
+
+    uint8_t *map = pipe->texture_map(pipe, resource, level, usage, box, &transfer);
+    if (!map)
+        return;
+
+    util_copy_box(map, resource->format,
+                  transfer->stride, transfer->layer_stride,
+                  0, 0, 0,
+                  box->width, box->height, box->depth,
+                  data, stride, layer_stride, 0, 0, 0);
+
+    pipe->texture_unmap(pipe, transfer);
 }
 
 static struct pipe_surface *mypipe_create_surface(struct pipe_context *pipe,
                                                   struct pipe_resource *pt,
                                                   const struct pipe_surface *surf_templ){
-    fprintf(stderr, "STUB: mypipe_create_surface\n");
-
     struct pipe_surface *ps;
 
     ps = CALLOC_STRUCT(pipe_surface);
@@ -180,15 +224,12 @@ static struct pipe_surface *mypipe_create_surface(struct pipe_context *pipe,
         ps->level = surf_templ->level;
         ps->first_layer = surf_templ->first_layer;
         ps->last_layer = surf_templ->last_layer;
-        if(ps->first_layer != ps->last_layer)
-            fprintf(stderr, "mypipe_create_surface: creating surface with multiple layers, rendering to first layer only\n");
     }
     return ps;
 }
 
 static void mypipe_surface_destroy(struct pipe_context *pipe,
                                    struct pipe_surface *surface){
-    fprintf(stderr, "STUB: mypipe_surface_destroy\n");
     assert(surface->texture);
     pipe_resource_reference(&surface->texture, NULL);
     FREE(surface);
@@ -199,11 +240,14 @@ static void mypipe_clear_texture(struct pipe_context *pipe,
                                  unsigned level,
                                  const struct pipe_box *box,
                                  const void *data){
-    fprintf(stderr, "STUB: mypipe_clear_texture\n");
+}
+
+static void mypipe_blit(struct pipe_context *pipe,
+                        const struct pipe_blit_info *info){
+    util_try_blit_via_copy_region(pipe, info, false);
 }
 
 void mypipe_init_context_texture_funcs(struct pipe_context *pipe){
-    fprintf(stderr, "STUB: mypipe_init_context_texture_funcs\n");
     pipe->buffer_map = mypipe_transfer_map;
     pipe->buffer_unmap = mypipe_transfer_unmap;
     pipe->texture_map = mypipe_texture_map;
@@ -214,4 +258,7 @@ void mypipe_init_context_texture_funcs(struct pipe_context *pipe){
     pipe->create_surface = mypipe_create_surface;
     pipe->surface_destroy = mypipe_surface_destroy;
     pipe->clear_texture = mypipe_clear_texture;
+    pipe->resource_copy_region = util_resource_copy_region;
+    pipe->blit = mypipe_blit;
+    pipe->resource_release = u_default_resource_release;
 }

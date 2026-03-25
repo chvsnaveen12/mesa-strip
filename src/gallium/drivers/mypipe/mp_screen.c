@@ -60,42 +60,88 @@ static bool mypipe_is_format_supported(struct pipe_screen *screen,
     if(sample_count > 1)
         return false;
 
-    if(target != PIPE_BUFFER && target != PIPE_TEXTURE_2D && target != PIPE_TEXTURE_CUBE)
+    if(target != PIPE_BUFFER && target != PIPE_TEXTURE_2D &&
+       target != PIPE_TEXTURE_CUBE && target != PIPE_TEXTURE_RECT)
         return false;
 
-    if(bind & PIPE_BIND_RENDER_TARGET){
+    /* Strip display/scanout/shared — check with winsys, then check remaining */
+    unsigned check = bind;
+    if(check & (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED)){
+        struct sw_winsys *winsys = mypipe_screen(screen)->winsys;
+        if(!winsys->is_displaytarget_format_supported(winsys, bind, format))
+            return false;
+        check &= ~(PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED);
+        if (!check)
+            return true;
+    }
+
+    /* Check each remaining bind flag — format must pass ALL */
+    if(check & PIPE_BIND_RENDER_TARGET){
         switch (format){
             case PIPE_FORMAT_B8G8R8A8_UNORM:
             case PIPE_FORMAT_B8G8R8X8_UNORM:
             case PIPE_FORMAT_R8G8B8A8_UNORM:
             case PIPE_FORMAT_R8G8B8X8_UNORM:
-                return true;
+                check &= ~PIPE_BIND_RENDER_TARGET;
+                break;
             default:
                 return false;
         }
     }
-    if(bind & PIPE_BIND_DEPTH_STENCIL){
+    if(check & PIPE_BIND_DEPTH_STENCIL){
         switch(format){
             case PIPE_FORMAT_Z24_UNORM_S8_UINT:
-                return true;
+            case PIPE_FORMAT_S8_UINT_Z24_UNORM:
+            case PIPE_FORMAT_Z24X8_UNORM:
+            case PIPE_FORMAT_X8Z24_UNORM:
+            case PIPE_FORMAT_Z16_UNORM:
+            case PIPE_FORMAT_Z32_FLOAT:
+            case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
+            case PIPE_FORMAT_S8_UINT:
+                check &= ~PIPE_BIND_DEPTH_STENCIL;
+                break;
             default:
                 return false;
         }
     }
-    if(bind & PIPE_BIND_SAMPLER_VIEW){
+    if(check & PIPE_BIND_SAMPLER_VIEW){
         switch (format){
+            /* Color formats */
             case PIPE_FORMAT_B8G8R8A8_UNORM:
             case PIPE_FORMAT_B8G8R8X8_UNORM:
             case PIPE_FORMAT_R8G8B8A8_UNORM:
             case PIPE_FORMAT_R8G8B8X8_UNORM:
-                return true;
+            case PIPE_FORMAT_R8_UNORM:
+            case PIPE_FORMAT_R8G8_UNORM:
+            case PIPE_FORMAT_A8_UNORM:
+            case PIPE_FORMAT_L8_UNORM:
+            case PIPE_FORMAT_L8A8_UNORM:
+            case PIPE_FORMAT_R32G32B32A32_FLOAT:
+            case PIPE_FORMAT_R32_FLOAT:
+            case PIPE_FORMAT_R32G32_FLOAT:
+            case PIPE_FORMAT_R32G32B32_FLOAT:
+            case PIPE_FORMAT_B8G8R8A8_SRGB:
+            case PIPE_FORMAT_R8G8B8A8_SRGB:
+            /* Depth formats as sampler view (shadow mapping, depth readback) */
+            case PIPE_FORMAT_Z24_UNORM_S8_UINT:
+            case PIPE_FORMAT_S8_UINT_Z24_UNORM:
+            case PIPE_FORMAT_Z24X8_UNORM:
+            case PIPE_FORMAT_X8Z24_UNORM:
+            case PIPE_FORMAT_Z16_UNORM:
+            case PIPE_FORMAT_Z32_FLOAT:
+            case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
+                check &= ~PIPE_BIND_SAMPLER_VIEW;
+                break;
             default:
                 return false;
         }
     }
-    if(bind & PIPE_BIND_VERTEX_BUFFER)
+    if(check & (PIPE_BIND_VERTEX_BUFFER | PIPE_BIND_CONSTANT_BUFFER | PIPE_BIND_INDEX_BUFFER))
         return true;
-    return false;
+
+    /* If we checked at least one bind above and didn't return false, accept it.
+     * Unknown bind flags (BLENDABLE, LINEAR, etc.) are ignored — we're software. */
+    return (bind != check) || (bind == 0);
 //    struct sw_winsys *winsys = mypipe_screen(screen)->winsys;
 //    const struct util_format_description *format_desc;
 
@@ -188,15 +234,47 @@ static void mypipe_flush_frontbuffer(struct pipe_screen * _screen,
                                      unsigned int level, unsigned int layer,
                                      void *context_private,
                                      unsigned nboxes, struct pipe_box *sub_box){
-    fprintf(stderr, "STUB: mypipe_flush_frontbuffer: resource=%p format=%d %ux%u level=%u layer=%u\n",
-            (void*)resource, resource->format, resource->width0, resource->height0, level, layer);
+    static int frame_count = 0;
+    frame_count++;
     struct mypipe_screen *screen = mypipe_screen(_screen);
     struct sw_winsys *winsys = screen->winsys;
     struct mypipe_resource *texture = mypipe_resource(resource);
     assert(texture->dt);
 
+    /* Copy shadow buffer → display target, then present */
+    if (texture->dt && texture->data) {
+        uint8_t *dt_map = winsys->displaytarget_map(winsys, texture->dt, PIPE_MAP_WRITE);
+        if (dt_map) {
+            unsigned stride = texture->stride[0];
+            unsigned h = resource->height0;
+            memcpy(dt_map, texture->data, (size_t)stride * h);
+            winsys->displaytarget_unmap(winsys, texture->dt);
+        }
+    }
+
     if(texture->dt)
         winsys->displaytarget_display(winsys, texture->dt, context_private, nboxes, sub_box);
+
+    /* Debug: dump framebuffer to PPM at frame 50 */
+    if (frame_count == 200 && texture->data) {
+        unsigned w = resource->width0, h = resource->height0;
+        unsigned stride = texture->stride[0];
+        FILE *f = fopen("/tmp/mypipe_frame50.ppm", "wb");
+        if (f) {
+            fprintf(f, "P6\n%u %u\n255\n", w, h);
+            for (unsigned y = 0; y < h; y++) {
+                uint8_t *row = (uint8_t*)texture->data + y * stride;
+                for (unsigned x = 0; x < w; x++) {
+                    /* Assume B8G8R8A8 or B8G8R8X8 */
+                    fputc(row[x*4+2], f); /* R */
+                    fputc(row[x*4+1], f); /* G */
+                    fputc(row[x*4+0], f); /* B */
+                }
+            }
+            fclose(f);
+            fprintf(stderr, ">>> DUMPED FRAME 50 to /tmp/mypipe_frame50.ppm <<<\n");
+        }
+    }
 }
 
 static const nir_shader_compiler_options mp_compiler_options = {
@@ -210,24 +288,25 @@ static void mypipe_init_shader_caps(struct mypipe_screen *screen){
     for(int i = 0; i < 2; i++){
         struct pipe_shader_caps *caps = &screen->base.shader_caps[stages[i]];
 
+        /* ES 2.0 level shader caps */
         caps->max_instructions =
         caps->max_alu_instructions =
         caps->max_tex_instructions =
-        caps->max_tex_indirections = 4096;
-        caps->max_outputs = 32;
+        caps->max_tex_indirections = 256;
+        caps->max_outputs = 8;
         caps->max_control_flow_depth = 8;
         caps->max_inputs = 8;
-        caps->max_const_buffer0_size = (4096 * sizeof(float[4]));
+        caps->max_const_buffer0_size = (256 * sizeof(float[4]));
         caps->max_const_buffers = 1;
-        caps->max_temps = 256;
-        caps->indirect_const_addr = true;
-        caps->subroutines = true;
+        caps->max_temps = 32;
+        caps->indirect_const_addr = false;
+        caps->subroutines = false;
         caps->integers = true;
         caps->max_texture_samplers = 8;
         caps->max_sampler_views = 8;
         caps->supported_irs = 1 << PIPE_SHADER_IR_NIR;
-        caps->max_shader_buffers = 0;  /* stripped: no SSBOs/atomics */
-        caps->max_shader_images = 0;   /* stripped: no image load/store */
+        caps->max_shader_buffers = 0;
+        caps->max_shader_images = 0;
     }
 }
 
@@ -236,122 +315,118 @@ static void mypipe_init_screen_caps(struct mypipe_screen *mp_screen){
     struct pipe_caps *caps = &mp_screen->base.caps;
 
     u_init_pipe_screen_caps(&mp_screen->base, 0);
+   /* ---- GL ES 2.0 / desktop GL 2.0 level caps ---- */
+   /* Tell Mesa we handle alpha test and flat shading natively in the rasterizer,
+    * so it doesn't try to lower them to shader variants (which we don't support). */
+   caps->alpha_test = true;
+   caps->flatshade = true;
    caps->npot_textures = true;
    caps->mixed_framebuffer_sizes = true;
    caps->mixed_color_depth_bits = true;
-   caps->fragment_shader_texture_lod = true;
+   caps->fragment_shader_texture_lod = false;
    caps->fragment_shader_derivatives = true;
-   caps->anisotropic_filter = true;
-   caps->max_render_targets = 8;
-   caps->max_dual_source_render_targets = 1;
-   caps->occlusion_query = true;
-   caps->query_time_elapsed = true;
-   caps->query_pipeline_statistics = true;
-   caps->texture_mirror_clamp = true;
-   caps->texture_mirror_clamp_to_edge = true;
+   caps->anisotropic_filter = false;
+   caps->max_render_targets = 1;
+   caps->max_dual_source_render_targets = 0;
+   caps->occlusion_query = false;
+   caps->query_time_elapsed = false;
+   caps->query_pipeline_statistics = false;
+   caps->texture_mirror_clamp = false;
+   caps->texture_mirror_clamp_to_edge = false;
    caps->texture_swizzle = true;
-   caps->max_texture_2d_size = 1 << (15 - 1);
-   caps->max_texture_3d_levels = 12;
-   caps->max_texture_cube_levels = 13;
+   caps->max_texture_2d_size = 2048;
+   caps->max_texture_3d_levels = 0;
+   caps->max_texture_cube_levels = 12;
    caps->blend_equation_separate = true;
-   caps->indep_blend_enable = true;
-   caps->indep_blend_func = true;
+   caps->indep_blend_enable = false;
+   caps->indep_blend_func = false;
    caps->fs_coord_origin_upper_left = true;
    caps->fs_coord_origin_lower_left = true;
    caps->fs_coord_pixel_center_half_integer = true;
    caps->fs_coord_pixel_center_integer = true;
-   caps->depth_clip_disable = true;
-   caps->depth_bounds_test = true;
-   caps->max_stream_output_buffers = 4;
-   caps->max_stream_output_separate_components =
-   caps->max_stream_output_interleaved_components = 16*4;
-   caps->max_geometry_output_vertices = 0;  /* stripped: no geometry shaders */
+   caps->depth_clip_disable = false;
+   caps->depth_bounds_test = false;
+   caps->max_stream_output_buffers = 0;
+   caps->max_stream_output_separate_components = 0;
+   caps->max_stream_output_interleaved_components = 0;
+   caps->max_geometry_output_vertices = 0;
    caps->max_geometry_total_output_components = 0;
-   caps->max_vertex_streams = 1;
+   caps->max_vertex_streams = 0;
    caps->max_vertex_attrib_stride = 2048;
-   caps->primitive_restart = true;
-   caps->primitive_restart_fixed_index = true;
-   caps->shader_stencil_export = true;
-   caps->image_atomic_float_add = false;  /* stripped: no atomics */
-   caps->vs_instanceid = true;
-   caps->vertex_element_instance_divisor = true;
-   caps->start_instance = true;
-   caps->seamless_cube_map = true;
-   caps->seamless_cube_map_per_texture = true;
-   caps->max_texture_array_layers = 256; /* for GL3 */
-   caps->min_texel_offset = -8;
-   caps->max_texel_offset = 7;
-   caps->conditional_render = true;
+   caps->primitive_restart = false;
+   caps->supported_prim_modes_with_restart =
+   caps->supported_prim_modes = (BITFIELD_MASK(MESA_PRIM_COUNT) & ~BITFIELD_BIT(MESA_PRIM_QUADS) & ~BITFIELD_BIT(MESA_PRIM_QUAD_STRIP));
+   caps->primitive_restart_fixed_index = false;
+   caps->shader_stencil_export = false;
+   caps->image_atomic_float_add = false;
+   caps->vs_instanceid = false;
+   caps->vertex_element_instance_divisor = false;
+   caps->start_instance = false;
+   caps->seamless_cube_map = false;
+   caps->seamless_cube_map_per_texture = false;
+   caps->max_texture_array_layers = 0;
+   caps->min_texel_offset = 0;
+   caps->max_texel_offset = 0;
+   caps->conditional_render = false;
    caps->fragment_color_clamped = true;
-   caps->vertex_color_unclamped = true; /* draw module */
-   caps->vertex_color_clamped = true; /* draw module */
+   caps->vertex_color_unclamped = true;
+   caps->vertex_color_clamped = true;
    caps->glsl_feature_level =
-   caps->glsl_feature_level_compatibility = 330;  /* stripped: cap at GL 3.3 */
-   caps->compute = false;  /* stripped: no compute shaders */
+   caps->glsl_feature_level_compatibility = 120;  /* GLSL 1.20 = GL 2.1 / ES 2.0 */
+   caps->compute = false;
    caps->user_vertex_buffers = true;
    caps->stream_output_pause_resume = false;
    caps->stream_output_interleave_buffers = false;
    caps->vs_layer_viewport = false;
-   caps->doubles = false;  /* stripped: no fp64 */
-   caps->int64 = false;    /* stripped: no int64 */
+   caps->doubles = false;
+   caps->int64 = false;
    caps->constant_buffer_offset_alignment = 16;
    caps->min_map_buffer_alignment = 64;
-   caps->query_timestamp = true;
-   caps->timer_resolution = true;
-   caps->cube_map_array = true;
-   caps->texture_buffer_objects = true;
-   caps->max_texel_buffer_elements = 65536;
-   caps->texture_buffer_offset_alignment = 16;
+   caps->query_timestamp = false;
+   caps->timer_resolution = false;
+   caps->cube_map_array = false;
+   caps->texture_buffer_objects = false;
+   caps->max_texel_buffer_elements = 0;
+   caps->texture_buffer_offset_alignment = 0;
    caps->texture_transfer_modes = 0;
-   caps->max_viewports = 16;
+   caps->max_viewports = 1;
    caps->endianness = 0;
-   caps->max_texture_gather_components = 4;
-   caps->texture_gather_sm5 = true;
-   caps->texture_query_lod = true;
-   caps->vs_window_space_position = true;
-   caps->fs_fine_derivative = true;
-   caps->sampler_view_target = true;
-   caps->fake_sw_msaa = true;
-   caps->min_texture_gather_offset = -32;
-   caps->max_texture_gather_offset = 31;
-   caps->draw_indirect = false;  /* stripped: no indirect draw */
-   caps->query_so_overflow = true;
+   caps->max_texture_gather_components = 0;
+   caps->texture_gather_sm5 = false;
+   caps->texture_query_lod = false;
+   caps->vs_window_space_position = false;
+   caps->fs_fine_derivative = false;
+   caps->sampler_view_target = false;
+   caps->fake_sw_msaa = false;
+   caps->min_texture_gather_offset = 0;
+   caps->max_texture_gather_offset = 0;
+   caps->draw_indirect = false;
+   caps->query_so_overflow = false;
    caps->nir_images_as_deref = false;
-
-   /* Can't expose shareable shaders because the draw shaders reference the
-    * draw module's state, which is per-context.
-    */
    caps->shareable_shaders = false;
 
    caps->vendor_id = 0xFFFFFFFF;
    caps->device_id = 0xFFFFFFFF;
 
-   /* XXX: Do we want to return the full amount fo system memory ? */
    uint64_t system_memory;
    if (os_get_total_physical_memory(&system_memory)) {
-      if (sizeof(void *) == 4)
-         /* Cap to 2 GB on 32 bits system. We do this because llvmpipe does
-          * eat application memory, which is quite limited on 32 bits. App
-          * shouldn't expect too much available memory. */
-         system_memory = MIN2(system_memory, 2048 << 20);
-
       caps->video_memory = system_memory >> 20;
    } else {
       caps->video_memory = 0;
    }
 
-   caps->uma = false;
-   caps->query_memory_info = true;
-   caps->conditional_render_inverted = true;
-   caps->clip_halfz = true;
+   caps->uma = true;
+   caps->query_memory_info = false;
+   caps->conditional_render_inverted = false;
+   caps->clip_halfz = false;
    caps->texture_float_linear = true;
    caps->texture_half_float_linear = true;
-   caps->framebuffer_no_attachment = true;
-   caps->cull_distance = true;
-   caps->copy_between_compressed_and_plain_formats = true;
-   caps->shader_array_components = true;
+   caps->framebuffer_no_attachment = false;
+   caps->cull_distance = false;
+   caps->copy_between_compressed_and_plain_formats = false;
+   caps->shader_array_components = false;
    caps->tgsi_texcoord = true;
-   caps->max_varyings = 32;
+   caps->max_varyings = 8;
    caps->pci_group =
    caps->pci_bus =
    caps->pci_device =

@@ -21,6 +21,9 @@ files_mypipe = files(
     'mp_state_query.c',
     'mp_flush.c',
     'mp_flush.h',
+    'mp_draw.c',
+    'mp_shader_exec.c',
+    'mp_raster.c',
 )
 
 libmypipe = static_library(

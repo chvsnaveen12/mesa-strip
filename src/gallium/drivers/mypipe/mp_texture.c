@@ -42,7 +42,6 @@ static bool mypipe_resource_layout(struct pipe_screen * screen, struct mypipe_re
     unsigned level;
     unsigned width = pt->width0;
     unsigned height = pt->height0;
-    unsigned depth = pt->depth0;
     uint64_t buffer_size = 0;
 
     if(pt->target == PIPE_BUFFER){
@@ -71,6 +70,8 @@ static bool mypipe_resource_layout(struct pipe_screen * screen, struct mypipe_re
 
     if(allocate){
         mpr->data = align_malloc(buffer_size, 64);
+        if (mpr->data)
+            memset(mpr->data, 0, buffer_size);
         return mpr->data != NULL;
     }
     return true;
@@ -79,8 +80,8 @@ static bool mypipe_resource_layout(struct pipe_screen * screen, struct mypipe_re
 static struct pipe_resource * mypipe_resource_create_front(struct pipe_screen *screen,
                                                             const struct pipe_resource *templat,
                                                             const void *map_from_private){
-    fprintf(stderr, "STUB: mypipe_resource_create_front: target=%d format=%d %dx%dx%d bind=[%s]\n",
-            templat->target, templat->format,
+    fprintf(stderr, "mypipe_resource_create_front: target=%d format=%s(%d) %dx%dx%d bind=[%s]\n",
+            templat->target, util_format_name(templat->format), templat->format,
             templat->width0, templat->height0, templat->depth0,
             pipe_bind_str(templat->bind));
 
@@ -96,12 +97,18 @@ static struct pipe_resource * mypipe_resource_create_front(struct pipe_screen *s
     mpr->pot = (util_is_power_of_two_or_zero(templat->width0) &&
                 util_is_power_of_two_or_zero(templat->height0) &&
                 util_is_power_of_two_or_zero(templat->depth0));
-    
+
     if(mpr->base.bind & (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED)){
         if(!mypipe_displaytarget_layout(screen, mpr, map_from_private)){
             FREE(mpr);
             return NULL;
         }
+        /* Also allocate a shadow buffer so rendering doesn't go directly
+         * to the X11 shared memory (avoids flickering on continuous loops). */
+        uint64_t sz = (uint64_t)mpr->stride[0] * templat->height0;
+        mpr->data = align_malloc(sz, 64);
+        if (mpr->data)
+            memset(mpr->data, 0, sz);
     }
     else {
         if(!mypipe_resource_layout(screen, mpr, true)){
@@ -118,15 +125,23 @@ static struct pipe_resource * mypipe_resource_create(struct pipe_screen * screen
     return mypipe_resource_create_front(screen, templat, NULL);
 }
 
-static void mypipe_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *pt){
-    fprintf(stderr, "STUB: mypipe_resource_destroy\n");
+void mypipe_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *pt){
+    struct mypipe_resource *mpr = mypipe_resource(pt);
+
+    if (mpr->dt) {
+        struct sw_winsys *winsys = mypipe_screen(pscreen)->winsys;
+        winsys->displaytarget_destroy(winsys, mpr->dt);
+        align_free(mpr->data);  /* shadow buffer */
+    } else {
+        align_free(mpr->data);
+    }
+    FREE(mpr);
 }
 
 static struct pipe_resource * mypipe_resource_from_handle(struct pipe_screen *screen,
                                                           const struct pipe_resource *templat,
                                                           struct winsys_handle *whandle,
                                                           unsigned int usage){
-    fprintf(stderr, "STUB: mypipe_resource_from_handle\n");
     return NULL;
 }
 
@@ -135,12 +150,10 @@ static bool mypipe_resource_get_handle(struct pipe_screen *screen,
                                        struct pipe_resource *pt,
                                        struct winsys_handle *whandle,
                                        unsigned int usage){
-    fprintf(stderr, "STUB: mypipe_resource_get_handle\n");
     return false;
 }
 
 static bool mypipe_can_create_resource(struct pipe_screen *screen, const struct pipe_resource *res){
-    fprintf(stderr, "STUB: mypipe_can_create_resource\n");
     struct mypipe_resource mpr;
     memset(&mpr, 0, sizeof(mpr));
     mpr.base = *res;
@@ -148,7 +161,6 @@ static bool mypipe_can_create_resource(struct pipe_screen *screen, const struct 
 }
 
 void mypipe_init_screen_texture_funcs(struct pipe_screen *screen){
-    fprintf(stderr, "STUB: mypipe_init_screen_texture_funcs\n");
     screen->resource_create = mypipe_resource_create;
     screen->resource_create_front = mypipe_resource_create_front;
     screen->resource_destroy = mypipe_resource_destroy;

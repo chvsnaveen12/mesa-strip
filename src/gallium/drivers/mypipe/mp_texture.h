@@ -4,6 +4,7 @@
 #include "pipe/p_state.h"
 
 void mypipe_init_screen_texture_funcs(struct pipe_screen *screen);
+void mypipe_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *pt);
 
 struct mypipe_resource{
     struct pipe_resource base;
