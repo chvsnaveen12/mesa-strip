@@ -446,7 +446,16 @@ void mp_rasterize_triangle(struct mypipe_context *mypipe,
 
     float inv_area = 1.0f / area;
 
-    /* Determine front-facing */
+    /* Determine front-facing using draw module's convention:
+     *   det = (v0-v2) x (v1-v2)
+     *   ccw = (det < 0)
+     *   face = (ccw == front_ccw) ? FRONT : BACK
+     */
+    float ex = v0->pos[0] - v2->pos[0];
+    float ey = v0->pos[1] - v2->pos[1];
+    float fx = v1->pos[0] - v2->pos[0];
+    float fy = v1->pos[1] - v2->pos[1];
+    float det = ex * fy - ey * fx;
     bool front_ccw = mypipe->rasterizer ? mypipe->rasterizer->front_ccw : false;
     bool front_face = front_ccw ? (area > 0) : (area < 0);
 
