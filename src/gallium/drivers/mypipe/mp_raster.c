@@ -519,6 +519,7 @@ void mp_rasterize_triangle(struct mypipe_context *mypipe,
             quad.y = qy;
             quad.mask = 0;
             quad.front_face = front_face;
+            quad.num_varyings = v0->num_varyings;
 
             for (int p = 0; p < 4; p++) {
                 float px = qx + dx[p] + 0.5f;
@@ -566,11 +567,11 @@ void mp_rasterize_triangle(struct mypipe_context *mypipe,
                              b1 * v1->varyings[a][c] * w1_inv +
                              b2 * v2->varyings[a][c] * w2_inv) * scale;
 
-                /* gl_FragCoord */
+                /* gl_FragCoord: w = 1/w_clip (interpolated reciprocal) */
                 quad.frag_coord[p][0] = px;
                 quad.frag_coord[p][1] = py;
                 quad.frag_coord[p][2] = quad.z[p];
-                quad.frag_coord[p][3] = (fabsf(denom) > 1e-12f) ? 1.0f / denom : 1.0f;
+                quad.frag_coord[p][3] = denom;
             }
 
             if (quad.mask == 0) continue;

@@ -58,42 +58,25 @@ static void fetch_texel(const uint8_t *data, unsigned stride,
     out[3] = rgba[3];
 }
 
-static void sample_texture_2d(const struct mypipe_context *ctx,
-                               unsigned sampler_idx,
-                               mesa_shader_stage stage,
-                               float s, float t,
-                               float out[4]) {
-    out[0] = out[1] = out[2] = 0.0f;
-    out[3] = 1.0f;
-
-    if (sampler_idx >= MP_MAX_SAMPLERS) return;
-
-    struct pipe_sampler_view *view = ctx->sampler_views[stage][sampler_idx];
-    struct pipe_sampler_state *samp = ctx->samplers[stage][sampler_idx];
-    if (!view || !samp || !view->texture) return;
-
-    struct mypipe_resource *mpr = mypipe_resource(view->texture);
-    unsigned w = view->texture->width0;
-    unsigned h = view->texture->height0;
+/* Sample one mip level */
+static void sample_texture_2d_level(const struct mypipe_resource *mpr,
+                                    struct pipe_sampler_view *view,
+                                    struct pipe_sampler_state *samp,
+                                    unsigned level,
+                                    float s, float t,
+                                    float out[4]) {
+    unsigned w = MAX2(1, view->texture->width0 >> level);
+    unsigned h = MAX2(1, view->texture->height0 >> level);
     enum pipe_format format = view->format;
 
-    uint8_t *data;
-    if (mpr->dt) {
-        struct sw_winsys *winsys = mypipe_screen(view->texture->screen)->winsys;
-        data = winsys->displaytarget_map(winsys, mpr->dt, PIPE_MAP_READ);
-    } else {
-        data = mpr->data;
-    }
-    if (!data) return;
-
-    unsigned stride = mpr->stride[0];
+    uint8_t *data = (uint8_t *)mpr->data + mpr->level_offset[level];
+    unsigned stride = mpr->stride[level];
 
     float fx = apply_wrap(s, samp->wrap_s, w);
     float fy = apply_wrap(t, samp->wrap_t, h);
 
     if (samp->min_img_filter == PIPE_TEX_FILTER_LINEAR ||
         samp->mag_img_filter == PIPE_TEX_FILTER_LINEAR) {
-        /* Bilinear filtering */
         float x0f = fx - 0.5f;
         float y0f = fy - 0.5f;
         int x0 = (int)floorf(x0f);
@@ -113,10 +96,64 @@ static void sample_texture_2d(const struct mypipe_context *ctx,
             out[c] = top + (bottom - top) * yfrac;
         }
     } else {
-        /* Nearest filtering */
         int ix = (int)floorf(fx);
         int iy = (int)floorf(fy);
         fetch_texel(data, stride, format, ix, iy, w, h, out);
+    }
+}
+
+static void sample_texture_2d(const struct mypipe_context *ctx,
+                               unsigned sampler_idx,
+                               mesa_shader_stage stage,
+                               float s, float t,
+                               float dsdx, float dsdy,
+                               float dtdx, float dtdy,
+                               float out[4]) {
+    out[0] = out[1] = out[2] = 0.0f;
+    out[3] = 1.0f;
+
+    if (sampler_idx >= MP_MAX_SAMPLERS) return;
+
+    struct pipe_sampler_view *view = ctx->sampler_views[stage][sampler_idx];
+    struct pipe_sampler_state *samp = ctx->samplers[stage][sampler_idx];
+    if (!view || !samp || !view->texture) return;
+
+    struct mypipe_resource *mpr = mypipe_resource(view->texture);
+    if (!mpr->data) return;
+
+    /* For display targets, sample level 0 from the display target */
+    if (mpr->dt) {
+        struct sw_winsys *winsys = mypipe_screen(view->texture->screen)->winsys;
+        uint8_t *dt_data = winsys->displaytarget_map(winsys, mpr->dt, PIPE_MAP_READ);
+        if (!dt_data) return;
+        unsigned w = view->texture->width0;
+        unsigned h = view->texture->height0;
+        float fx = apply_wrap(s, samp->wrap_s, w);
+        float fy = apply_wrap(t, samp->wrap_t, h);
+        int ix = (int)floorf(fx);
+        int iy = (int)floorf(fy);
+        fetch_texel(dt_data, mpr->stride[0], view->format, ix, iy, w, h, out);
+        winsys->displaytarget_unmap(winsys, mpr->dt);
+    } else {
+        /* Compute LOD from screen-space derivatives */
+        unsigned last_level = view->texture->last_level;
+        unsigned level = 0;
+
+        if (last_level > 0) {
+            float w0 = (float)view->texture->width0;
+            float h0 = (float)view->texture->height0;
+            float dudx = dsdx * w0, dudy = dsdy * w0;
+            float dvdx = dtdx * h0, dvdy = dtdy * h0;
+            float rho_x = sqrtf(dudx * dudx + dvdx * dvdx);
+            float rho_y = sqrtf(dudy * dudy + dvdy * dvdy);
+            float rho = fmaxf(rho_x, rho_y);
+            if (rho > 1.0f) {
+                float lod = log2f(rho);
+                level = (unsigned)CLAMP((int)(lod + 0.5f), 0, (int)last_level);
+            }
+        }
+
+        sample_texture_2d_level(mpr, view, samp, level, s, t, out);
     }
 
     /* Apply swizzle from sampler view */
@@ -133,11 +170,6 @@ static void sample_texture_2d(const struct mypipe_context *ctx,
         case PIPE_SWIZZLE_1: out[c] = 1.0f; break;
         default: break;
         }
-    }
-
-    if (mpr->dt) {
-        struct sw_winsys *winsys = mypipe_screen(view->texture->screen)->winsys;
-        winsys->displaytarget_unmap(winsys, mpr->dt);
     }
 }
 
@@ -166,32 +198,48 @@ static void write_dest(const nir_def *def, float t[][4], const float val[4]) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Core NIR interpreter                                                */
+/* Core NIR interpreter with proper control flow                       */
 /* ------------------------------------------------------------------ */
 
-static void mp_exec_shader(const struct mp_compiled_shader *shader,
-                            const struct mypipe_context *ctx,
-                            mesa_shader_stage stage,
-                            float inputs[][4], unsigned num_inputs,
-                            float outputs[][4], unsigned *num_outputs,
-                            const void *uniforms,
-                            float frag_coord[4],
-                            bool front_face,
-                            bool *discard_flag) {
-    nir_shader *nir = shader->nir;
-    if (!nir) return;
+enum mp_flow { MP_FLOW_NORMAL = 0, MP_FLOW_BREAK, MP_FLOW_CONTINUE, MP_FLOW_RETURN };
 
-    float t[MP_MAX_SSA][4];
+struct mp_interp_state {
+    float (*t)[4]; /* SSA temps [MP_MAX_SSA][4] */
     float hw[MP_MAX_HW_REGS][4];
-    memset(t, 0, sizeof(t));
-    memset(hw, 0, sizeof(hw));
+    const struct mp_compiled_shader *shader;
+    const struct mypipe_context *ctx;
+    mesa_shader_stage stage;
+    float (*inputs)[4];
+    unsigned num_inputs;
+    float (*outputs)[4];
+    unsigned *num_outputs;
+    const void *uniforms;
+    float *frag_coord;
+    bool front_face;
+    bool *discard_flag;
+    /* Per-quad varying derivatives for LOD computation */
+    float quad_dvdx[MP_MAX_VARYINGS][4]; /* d(varying)/dx */
+    float quad_dvdy[MP_MAX_VARYINGS][4]; /* d(varying)/dy */
+    /* Track which FS input varying each SSA value came from (-1 = not a varying) */
+    int *ssa_src_varying;
+};
 
-    *num_outputs = 0;
+static enum mp_flow exec_cf_list(struct mp_interp_state *st, struct exec_list *cf_list);
 
-    nir_foreach_function_impl(impl, nir) {
-        nir_foreach_block(block, impl) {
-            nir_foreach_instr(instr, block) {
-                switch (instr->type) {
+static enum mp_flow exec_block(struct mp_interp_state *st, nir_block *block) {
+    const struct mp_compiled_shader *shader = st->shader;
+    float (*t)[4] = st->t;
+    float (*hw)[4] = st->hw;
+    mesa_shader_stage stage = st->stage;
+    unsigned num_inputs = st->num_inputs;
+    float (*inputs)[4] = st->inputs;
+    float (*outputs)[4] = st->outputs;
+    const void *uniforms = st->uniforms;
+    float *frag_coord = st->frag_coord;
+    bool front_face = st->front_face;
+
+    nir_foreach_instr(instr, block) {
+        switch (instr->type) {
 
                 case nir_instr_type_load_const: {
                     nir_load_const_instr *lc = nir_instr_as_load_const(instr);
@@ -242,7 +290,7 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
                         case nir_op_ffloor:  dst[c] = floorf(a); break;
                         case nir_op_fceil:   dst[c] = ceilf(a); break;
                         case nir_op_ffract:  dst[c] = a - floorf(a); break;
-                        case nir_op_fround_even: dst[c] = roundf(a); break;
+                        case nir_op_fround_even: dst[c] = rintf(a); break;
                         case nir_op_fadd:    dst[c] = a + b; break;
                         case nir_op_fsub:    dst[c] = a - b; break;
                         case nir_op_fmul:    dst[c] = a * b; break;
@@ -288,6 +336,8 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
                         case nir_op_seq:     dst[c] = (a == b) ? 1.0f : 0.0f; break;
                         case nir_op_sne:     dst[c] = (a != b) ? 1.0f : 0.0f; break;
                         case nir_op_bcsel:   { mp_reg cond; cond.f = a; dst[c] = cond.u ? b : cc_; break; }
+                        case nir_op_b2b1:    { mp_reg cond; cond.f = a; mp_reg r; r.u = cond.u ? 1u : 0u; dst[c] = r.f; break; }
+                        case nir_op_b2b32:   { mp_reg cond; cond.f = a; mp_reg r; r.u = cond.u ? ~0u : 0u; dst[c] = r.f; break; }
                         case nir_op_b2f32:   { mp_reg cond; cond.f = a; dst[c] = cond.u ? 1.0f : 0.0f; break; }
                         case nir_op_b2i32:   { mp_reg cond, r; cond.f = a; r.i = cond.u ? 1 : 0; dst[c] = r.f; break; }
                         case nir_op_f2i32:   { mp_reg r; r.i = (int32_t)a; dst[c] = r.f; break; }
@@ -316,6 +366,22 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
                         }
                     }
                     write_dest(&alu->def, t, dst);
+                    /* Propagate source-varying tag for mov/vec ops */
+                    if (st->ssa_src_varying) {
+                        unsigned di = alu->def.index;
+                        if (di < MP_MAX_SSA) {
+                            if (alu->op == nir_op_mov) {
+                                unsigned si = alu->src[0].src.ssa->index;
+                                st->ssa_src_varying[di] = (si < MP_MAX_SSA) ? st->ssa_src_varying[si] : -1;
+                            } else if (alu->op >= nir_op_vec2 && alu->op <= nir_op_vec4) {
+                                /* Use the tag from the first source */
+                                unsigned si = alu->src[0].src.ssa->index;
+                                st->ssa_src_varying[di] = (si < MP_MAX_SSA) ? st->ssa_src_varying[si] : -1;
+                            } else {
+                                st->ssa_src_varying[di] = -1;
+                            }
+                        }
+                    }
                     break;
                 }
 
@@ -356,17 +422,52 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
                     }
 
                     case nir_intrinsic_load_input: {
-                        /* Use base (driver_location) — assigned sequentially by
-                         * nir_lower_io, matches vertex element order for VS and
-                         * varying order for FS. */
                         unsigned slot = nir_intrinsic_base(intrin);
                         unsigned comp = nir_intrinsic_component(intrin);
+                        unsigned io_loc = nir_intrinsic_io_semantics(intrin).location;
                         float val[4] = {0, 0, 0, 0};
-                        if (slot < (unsigned)num_inputs) {
-                            for (unsigned c = 0; c < intrin->def.num_components; c++)
-                                val[c] = inputs[slot][comp + c];
+
+                        if (stage == MESA_SHADER_FRAGMENT &&
+                            io_loc == VARYING_SLOT_FACE) {
+                            /* gl_FrontFacing: return as NIR bool */
+                            mp_reg r;
+                            r.u = front_face ? ~0u : 0u;
+                            val[0] = r.f;
+                        } else if (stage == MESA_SHADER_FRAGMENT &&
+                                   io_loc == VARYING_SLOT_POS) {
+                            /* gl_FragCoord */
+                            if (frag_coord) {
+                                for (unsigned c = 0; c < intrin->def.num_components; c++)
+                                    val[c] = frag_coord[comp + c];
+                            }
+                        } else if (stage == MESA_SHADER_FRAGMENT) {
+                            /* FS user varyings: nir_lower_io assigns base numbers
+                             * to ALL declared inputs including system values (POS,
+                             * FACE). Subtract the system-value base slots to get
+                             * the correct index into our varyings array. */
+                            unsigned offset = shader->fs_input_base_offset;
+                            unsigned vary_idx = (slot >= offset) ? slot - offset : 0;
+                            if (vary_idx < (unsigned)num_inputs) {
+                                for (unsigned c = 0; c < intrin->def.num_components; c++)
+                                    val[c] = inputs[vary_idx][comp + c];
+                            }
+                        } else {
+                            /* VS: base maps directly to vertex attribute index */
+                            if (slot < (unsigned)num_inputs) {
+                                for (unsigned c = 0; c < intrin->def.num_components; c++)
+                                    val[c] = inputs[slot][comp + c];
+                            }
                         }
                         write_dest(&intrin->def, t, val);
+                        /* Tag this SSA with its source varying index for LOD derivatives */
+                        if (st->ssa_src_varying && stage == MESA_SHADER_FRAGMENT &&
+                            io_loc != VARYING_SLOT_FACE && io_loc != VARYING_SLOT_POS) {
+                            unsigned offset = shader->fs_input_base_offset;
+                            unsigned vary_idx = (slot >= offset) ? slot - offset : 0;
+                            unsigned def_idx = intrin->def.index;
+                            if (def_idx < MP_MAX_SSA)
+                                st->ssa_src_varying[def_idx] = (int)vary_idx;
+                        }
                         break;
                     }
 
@@ -390,8 +491,8 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
                             if (wrmask & (1u << c))
                                 outputs[slot][comp + c] = val[c];
                         }
-                        if (slot >= *num_outputs)
-                            *num_outputs = slot + 1;
+                        if (slot >= *st->num_outputs)
+                            *st->num_outputs = slot + 1;
                         break;
                     }
 
@@ -463,7 +564,7 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
 
                     case nir_intrinsic_demote:
                     case nir_intrinsic_terminate:
-                        if (discard_flag) *discard_flag = true;
+                        if (st->discard_flag) *st->discard_flag = true;
                         break;
 
                     case nir_intrinsic_demote_if:
@@ -473,8 +574,8 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
                                  (const float (*)[4])hw, shader, cond);
                         mp_reg cr;
                         cr.f = cond[0];
-                        if (cr.u && discard_flag)
-                            *discard_flag = true;
+                        if (cr.u && st->discard_flag)
+                            *st->discard_flag = true;
                         break;
                     }
 
@@ -488,8 +589,10 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
                     nir_tex_instr *tex = nir_instr_as_tex(instr);
                     float coord[4] = {0, 0, 0, 0};
                     float projector = 1.0f;
+                    float ddx[4] = {0, 0, 0, 0};
+                    float ddy[4] = {0, 0, 0, 0};
+                    bool has_derivs = false;
 
-                    /* Find coordinate and projector sources */
                     for (unsigned s = 0; s < tex->num_srcs; s++) {
                         if (tex->src[s].src_type == nir_tex_src_coord) {
                             read_src(&tex->src[s].src, (const float (*)[4])t,
@@ -499,10 +602,16 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
                             read_src(&tex->src[s].src, (const float (*)[4])t,
                                      (const float (*)[4])hw, shader, proj);
                             projector = proj[0];
+                        } else if (tex->src[s].src_type == nir_tex_src_ddx) {
+                            read_src(&tex->src[s].src, (const float (*)[4])t,
+                                     (const float (*)[4])hw, shader, ddx);
+                            has_derivs = true;
+                        } else if (tex->src[s].src_type == nir_tex_src_ddy) {
+                            read_src(&tex->src[s].src, (const float (*)[4])t,
+                                     (const float (*)[4])hw, shader, ddy);
                         }
                     }
 
-                    /* Apply projective divide */
                     float s_coord = coord[0];
                     float t_coord = coord[1];
                     if (projector != 0.0f && projector != 1.0f) {
@@ -511,22 +620,126 @@ static void mp_exec_shader(const struct mp_compiled_shader *shader,
                         t_coord *= inv_proj;
                     }
 
+                    /* Compute derivatives for LOD */
+                    float use_dsdx = 0, use_dsdy = 0, use_dtdx = 0, use_dtdy = 0;
+                    if (has_derivs) {
+                        use_dsdx = ddx[0]; use_dsdy = ddx[1];
+                        use_dtdx = ddy[0]; use_dtdy = ddy[1];
+                    } else if (st->ssa_src_varying) {
+                        /* Look up which varying the coord came from */
+                        int src_vary = -1;
+                        for (unsigned si = 0; si < tex->num_srcs; si++) {
+                            if (tex->src[si].src_type == nir_tex_src_coord) {
+                                unsigned ci = tex->src[si].src.ssa->index;
+                                if (ci < MP_MAX_SSA)
+                                    src_vary = st->ssa_src_varying[ci];
+                                break;
+                            }
+                        }
+                        if (src_vary >= 0 && src_vary < MP_MAX_VARYINGS) {
+                            use_dsdx = st->quad_dvdx[src_vary][0];
+                            use_dsdy = st->quad_dvdy[src_vary][0];
+                            use_dtdx = st->quad_dvdx[src_vary][1];
+                            use_dtdy = st->quad_dvdy[src_vary][1];
+                        }
+                    }
+
                     float result[4] = {0, 0, 0, 1};
-                    sample_texture_2d(ctx, tex->sampler_index, stage,
-                                      s_coord, t_coord, result);
+                    sample_texture_2d(st->ctx, tex->sampler_index, stage,
+                                      s_coord, t_coord,
+                                      use_dsdx, use_dsdy,
+                                      use_dtdx, use_dtdy,
+                                      result);
                     write_dest(&tex->def, t, result);
                     break;
                 }
 
-                case nir_instr_type_jump:
-                    /* Simple: just skip — actual control flow not needed for linear shaders */
+                case nir_instr_type_jump: {
+                    nir_jump_instr *jump = nir_instr_as_jump(instr);
+                    switch (jump->type) {
+                    case nir_jump_break:    return MP_FLOW_BREAK;
+                    case nir_jump_continue: return MP_FLOW_CONTINUE;
+                    case nir_jump_return:   return MP_FLOW_RETURN;
+                    default: break;
+                    }
                     break;
+                }
 
                 default:
                     break;
                 }
             }
+    return MP_FLOW_NORMAL;
+}
+
+static enum mp_flow exec_cf_list(struct mp_interp_state *st, struct exec_list *cf_list) {
+    foreach_list_typed(nir_cf_node, node, node, cf_list) {
+        enum mp_flow flow;
+        switch (node->type) {
+        case nir_cf_node_block:
+            flow = exec_block(st, nir_cf_node_as_block(node));
+            if (flow != MP_FLOW_NORMAL) return flow;
+            break;
+        case nir_cf_node_if: {
+            nir_if *nif = nir_cf_node_as_if(node);
+            float cond_val[4];
+            read_src(&nif->condition, (const float (*)[4])st->t,
+                     (const float (*)[4])st->hw, st->shader, cond_val);
+            mp_reg cr; cr.f = cond_val[0];
+            flow = cr.u ? exec_cf_list(st, &nif->then_list)
+                        : exec_cf_list(st, &nif->else_list);
+            if (flow != MP_FLOW_NORMAL) return flow;
+            break;
         }
+        case nir_cf_node_loop: {
+            nir_loop *loop = nir_cf_node_as_loop(node);
+            for (int iter = 0; iter < 4096; iter++) {
+                flow = exec_cf_list(st, &loop->body);
+                if (flow == MP_FLOW_BREAK) break;
+                if (flow == MP_FLOW_RETURN) return MP_FLOW_RETURN;
+            }
+            break;
+        }
+        default: break;
+        }
+    }
+    return MP_FLOW_NORMAL;
+}
+
+static void mp_exec_shader(const struct mp_compiled_shader *shader,
+                            const struct mypipe_context *ctx,
+                            mesa_shader_stage stage,
+                            float inputs[][4], unsigned num_inputs,
+                            float outputs[][4], unsigned *num_outputs,
+                            const void *uniforms,
+                            float frag_coord[4],
+                            bool front_face,
+                            bool *discard_flag) {
+    nir_shader *nir = shader->nir;
+    if (!nir) return;
+
+    static float ssa_temps[MP_MAX_SSA][4];
+    memset(ssa_temps, 0, sizeof(ssa_temps));
+
+    struct mp_interp_state st;
+    memset(&st, 0, sizeof(st));
+    st.t = ssa_temps;
+    st.shader = shader;
+    st.ctx = ctx;
+    st.stage = stage;
+    st.inputs = inputs;
+    st.num_inputs = num_inputs;
+    st.outputs = outputs;
+    st.num_outputs = num_outputs;
+    st.uniforms = uniforms;
+    st.frag_coord = frag_coord;
+    st.front_face = front_face;
+    st.discard_flag = discard_flag;
+
+    *num_outputs = 0;
+
+    nir_foreach_function_impl(impl, nir) {
+        exec_cf_list(&st, &impl->body);
     }
 }
 
@@ -583,7 +796,6 @@ void mp_run_fs(const struct mp_compiled_shader *shader,
                const struct mypipe_context *ctx,
                const void *uniforms, struct mp_quad *quad) {
     if (!shader || !shader->nir) {
-        /* Fallback: red */
         for (int p = 0; p < 4; p++) {
             quad->color_out[p][0] = 1.0f;
             quad->color_out[p][1] = 0.0f;
@@ -593,31 +805,67 @@ void mp_run_fs(const struct mp_compiled_shader *shader,
         return;
     }
 
-    for (int p = 0; p < 4; p++) {
-        /* Copy interpolated varyings into inputs */
-        float fs_inputs[MP_MAX_VARYINGS][4];
-        unsigned num_varyings = 0;
+    unsigned num_varyings = quad->num_varyings;
+    if (num_varyings == 0)
+        num_varyings = MP_MAX_VARYINGS;
 
-        for (unsigned v = 0; v < MP_MAX_VARYINGS; v++) {
-            memcpy(fs_inputs[v], quad->varyings[v][p], 4 * sizeof(float));
-            /* Count active varyings */
-            if (quad->varyings[v][p][0] != 0 || quad->varyings[v][p][1] != 0 ||
-                quad->varyings[v][p][2] != 0 || quad->varyings[v][p][3] != 0)
-                num_varyings = v + 1;
+    /* Pre-compute per-quad varying derivatives from the 2x2 quad.
+     * pixel 0=(x,y), 1=(x+1,y), 2=(x,y+1), 3=(x+1,y+1)
+     * dFdx = pixel1 - pixel0,  dFdy = pixel2 - pixel0 */
+    float dvdx[MP_MAX_VARYINGS][4];
+    float dvdy[MP_MAX_VARYINGS][4];
+    for (unsigned v = 0; v < num_varyings; v++) {
+        for (int c = 0; c < 4; c++) {
+            dvdx[v][c] = quad->varyings[v][1][c] - quad->varyings[v][0][c];
+            dvdy[v][c] = quad->varyings[v][2][c] - quad->varyings[v][0][c];
         }
+    }
+
+    /* SSA source-varying tracker for derivative propagation */
+    static int ssa_src_vary[MP_MAX_SSA];
+
+    for (int p = 0; p < 4; p++) {
+        float fs_inputs[MP_MAX_VARYINGS][4];
+        for (unsigned v = 0; v < num_varyings; v++)
+            memcpy(fs_inputs[v], quad->varyings[v][p], 4 * sizeof(float));
 
         float outputs[2][4];
         memset(outputs, 0, sizeof(outputs));
         unsigned num_outputs = 0;
         bool discard = false;
 
-        mp_exec_shader(shader, ctx, MESA_SHADER_FRAGMENT,
-                        fs_inputs, num_varyings > 0 ? num_varyings : MP_MAX_VARYINGS,
-                        outputs, &num_outputs,
-                        uniforms,
-                        quad->frag_coord[p],
-                        quad->front_face,
-                        &discard);
+        /* Reset varying tags */
+        memset(ssa_src_vary, -1, sizeof(ssa_src_vary));
+
+        /* Set up the interp state with quad derivatives.
+         * mp_exec_shader builds st internally, so we need to set the
+         * derivatives on the state AFTER it's built. We do this by
+         * calling the internal exec_cf_list directly. */
+        static float ssa_temps[MP_MAX_SSA][4];
+        memset(ssa_temps, 0, sizeof(ssa_temps));
+
+        struct mp_interp_state st;
+        memset(&st, 0, sizeof(st));
+        st.t = ssa_temps;
+        st.shader = shader;
+        st.ctx = ctx;
+        st.stage = MESA_SHADER_FRAGMENT;
+        st.inputs = fs_inputs;
+        st.num_inputs = num_varyings;
+        st.outputs = outputs;
+        st.num_outputs = &num_outputs;
+        st.uniforms = uniforms;
+        st.frag_coord = quad->frag_coord[p];
+        st.front_face = quad->front_face;
+        st.discard_flag = &discard;
+        memcpy(st.quad_dvdx, dvdx, sizeof(dvdx));
+        memcpy(st.quad_dvdy, dvdy, sizeof(dvdy));
+        st.ssa_src_varying = ssa_src_vary;
+
+        num_outputs = 0;
+        nir_foreach_function_impl(impl, shader->nir) {
+            exec_cf_list(&st, &impl->body);
+        }
 
         if (discard) {
             quad->mask &= ~(1 << p);

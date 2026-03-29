@@ -10,7 +10,7 @@ struct mypipe_context;
 /* Register type for the interpreter */
 typedef union { float f; uint32_t u; int32_t i; } mp_reg;
 #define MP_MAX_HW_REGS 32
-#define MP_MAX_SSA     128
+#define MP_MAX_SSA     4096
 
 struct mp_vs_output {
     float position[4];

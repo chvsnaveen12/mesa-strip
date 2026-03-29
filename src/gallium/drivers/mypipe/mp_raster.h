@@ -26,6 +26,7 @@ struct mp_quad {
     float    bary[4][3];                    /* barycentric [pixel][v0,v1,v2] */
     float    z[4];                          /* interpolated depth */
     float    varyings[MP_MAX_VARYINGS][4][4]; /* [varying][pixel][component] */
+    unsigned num_varyings;                  /* actual varying count from VS */
     float    color_out[4][4];               /* FS output [pixel][rgba] */
     float    frag_coord[4][4];              /* gl_FragCoord [pixel][xyzw] */
     bool     front_face;                    /* gl_FrontFacing */
