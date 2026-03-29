@@ -179,6 +179,8 @@ static unsigned clip_triangle(struct mp_clip_vertex *verts, bool clip_z) {
         n = clip_polygon_plane(src, n, dst, plane);
         if (n == 0) return 0;
     }
+    /* With 6 planes (even count): result in verts.
+     * With 4 planes (even count): result in verts. Good. */
     return n;
 }
 
@@ -195,18 +197,27 @@ static bool mp_cull_triangle(const struct mypipe_context *ctx,
     unsigned cull_face = ctx->rasterizer->cull_face;
     if (cull_face == PIPE_FACE_NONE) return false;
 
-    /* Signed area in screen space (2x) */
-    float area = (v1->pos[0] - v0->pos[0]) * (v2->pos[1] - v0->pos[1])
-               - (v2->pos[0] - v0->pos[0]) * (v1->pos[1] - v0->pos[1]);
+    /* Match draw module's sign convention (draw_pipe_cull.c):
+     *   e = v0 - v2, f = v1 - v2
+     *   det = e.x * f.y - e.y * f.x
+     *   ccw = (det < 0)
+     */
+    float ex = v0->pos[0] - v2->pos[0];
+    float ey = v0->pos[1] - v2->pos[1];
+    float fx = v1->pos[0] - v2->pos[0];
+    float fy = v1->pos[1] - v2->pos[1];
+    float det = ex * fy - ey * fx;
 
-    bool front_ccw = ctx->rasterizer->front_ccw;
-    bool is_front = front_ccw ? (area > 0) : (area < 0);
+    if (det == 0.0f) {
+        /* Zero-area triangle is back-facing (per GL spec) */
+        return (cull_face & PIPE_FACE_BACK) != 0;
+    }
 
-    if (cull_face == PIPE_FACE_FRONT && is_front) return true;
-    if (cull_face == PIPE_FACE_BACK && !is_front) return true;
-    if (cull_face == PIPE_FACE_FRONT_AND_BACK) return true;
+    unsigned ccw = (det < 0);
+    unsigned face = (ccw == ctx->rasterizer->front_ccw)
+                    ? PIPE_FACE_FRONT : PIPE_FACE_BACK;
 
-    return false;
+    return (face & cull_face) != 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -485,7 +496,7 @@ void mypipe_do_draw_vbo(struct mypipe_context *mypipe,
 
         case MESA_PRIM_QUAD_STRIP:
             for (unsigned i = 0; i + 4 <= count; i += 2) {
-                /* Match softpipe's decomposition: fan from last vertex (v3) */
+                /* Match softpipe: (v0,v1,v3), (v2,v0,v3) */
                 emit_triangle(mypipe, VIDX(i), VIDX(i+1), VIDX(i+3), vs_uniforms, &mpfb);
                 emit_triangle(mypipe, VIDX(i+2), VIDX(i), VIDX(i+3), vs_uniforms, &mpfb);
             }
