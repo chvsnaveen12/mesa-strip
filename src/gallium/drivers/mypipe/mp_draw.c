@@ -164,25 +164,23 @@ static unsigned clip_polygon_plane(struct mp_clip_vertex *in, unsigned n_in,
     return n_out;
 }
 
-static unsigned clip_triangle(struct mp_clip_vertex *verts) {
+/* clip_triangle: Sutherland-Hodgman against frustum planes.
+ * clip_z: if true, clip against near/far Z planes (planes 4,5).
+ *         if false, only clip XY (planes 0-3).
+ *         Matches draw module: clip_z = rasterizer->depth_clip_near. */
+static unsigned clip_triangle(struct mp_clip_vertex *verts, bool clip_z) {
     struct mp_clip_vertex buf[MP_MAX_CLIP_VERTS];
     unsigned n = 3;
+    int num_planes = clip_z ? 6 : 4;
 
-    for (int plane = 0; plane < 6; plane++) {
+    for (int plane = 0; plane < num_planes; plane++) {
         struct mp_clip_vertex *src = (plane & 1) ? buf : verts;
         struct mp_clip_vertex *dst = (plane & 1) ? verts : buf;
         n = clip_polygon_plane(src, n, dst, plane);
         if (n == 0) return 0;
     }
-    /* Result is in verts if we did even number of swaps (6 planes) */
-    /* After 6 planes: final output is in buf (plane=5 wrote to verts). Wait:
-     * plane 0: src=verts, dst=buf
-     * plane 1: src=buf, dst=verts
-     * plane 2: src=verts, dst=buf
-     * plane 3: src=buf, dst=verts
-     * plane 4: src=verts, dst=buf
-     * plane 5: src=buf, dst=verts
-     * Final output is in verts. Good. */
+    /* With 6 planes (even count): result in verts.
+     * With 4 planes (even count): result in verts. Good. */
     return n;
 }
 
@@ -199,18 +197,27 @@ static bool mp_cull_triangle(const struct mypipe_context *ctx,
     unsigned cull_face = ctx->rasterizer->cull_face;
     if (cull_face == PIPE_FACE_NONE) return false;
 
-    /* Signed area in screen space (2x) */
-    float area = (v1->pos[0] - v0->pos[0]) * (v2->pos[1] - v0->pos[1])
-               - (v2->pos[0] - v0->pos[0]) * (v1->pos[1] - v0->pos[1]);
+    /* Match draw module's sign convention (draw_pipe_cull.c):
+     *   e = v0 - v2, f = v1 - v2
+     *   det = e.x * f.y - e.y * f.x
+     *   ccw = (det < 0)
+     */
+    float ex = v0->pos[0] - v2->pos[0];
+    float ey = v0->pos[1] - v2->pos[1];
+    float fx = v1->pos[0] - v2->pos[0];
+    float fy = v1->pos[1] - v2->pos[1];
+    float det = ex * fy - ey * fx;
 
-    bool front_ccw = ctx->rasterizer->front_ccw;
-    bool is_front = front_ccw ? (area > 0) : (area < 0);
+    if (det == 0.0f) {
+        /* Zero-area triangle is back-facing (per GL spec) */
+        return (cull_face & PIPE_FACE_BACK) != 0;
+    }
 
-    if (cull_face == PIPE_FACE_FRONT && is_front) return true;
-    if (cull_face == PIPE_FACE_BACK && !is_front) return true;
-    if (cull_face == PIPE_FACE_FRONT_AND_BACK) return true;
+    unsigned ccw = (det < 0);
+    unsigned face = (ccw == ctx->rasterizer->front_ccw)
+                    ? PIPE_FACE_FRONT : PIPE_FACE_BACK;
 
-    return false;
+    return (face & cull_face) != 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -287,8 +294,10 @@ static void emit_triangle(struct mypipe_context *mypipe,
         memcpy(pv_varyings, clip_verts[pv].varyings, pv_num * 4 * sizeof(float));
     }
 
-    /* Clip */
-    unsigned n = clip_triangle(clip_verts);
+    /* Clip — only clip Z planes if depth_clip_near is set
+     * (matches draw module: clip_z = rasterizer->depth_clip_near) */
+    bool clip_z = mypipe->rasterizer && mypipe->rasterizer->depth_clip_near;
+    unsigned n = clip_triangle(clip_verts, clip_z);
     if (n < 3) return;
 
     /* Flat shading: stamp provoking vertex's varyings onto all clipped verts */
@@ -479,15 +488,17 @@ void mypipe_do_draw_vbo(struct mypipe_context *mypipe,
 
         case MESA_PRIM_QUADS:
             for (unsigned i = 0; i + 4 <= count; i += 4) {
-                emit_triangle(mypipe, VIDX(i), VIDX(i+1), VIDX(i+2), vs_uniforms, &mpfb);
-                emit_triangle(mypipe, VIDX(i), VIDX(i+2), VIDX(i+3), vs_uniforms, &mpfb);
+                /* Match softpipe's decomposition: fan from last vertex (v3) */
+                emit_triangle(mypipe, VIDX(i), VIDX(i+1), VIDX(i+3), vs_uniforms, &mpfb);
+                emit_triangle(mypipe, VIDX(i+1), VIDX(i+2), VIDX(i+3), vs_uniforms, &mpfb);
             }
             break;
 
         case MESA_PRIM_QUAD_STRIP:
+            /* Match softpipe: (v0,v1,v3), (v2,v0,v3) */
             for (unsigned i = 0; i + 4 <= count; i += 2) {
-                emit_triangle(mypipe, VIDX(i), VIDX(i+1), VIDX(i+2), vs_uniforms, &mpfb);
-                emit_triangle(mypipe, VIDX(i+2), VIDX(i+1), VIDX(i+3), vs_uniforms, &mpfb);
+                emit_triangle(mypipe, VIDX(i), VIDX(i+1), VIDX(i+3), vs_uniforms, &mpfb);
+                emit_triangle(mypipe, VIDX(i+2), VIDX(i), VIDX(i+3), vs_uniforms, &mpfb);
             }
             break;
 

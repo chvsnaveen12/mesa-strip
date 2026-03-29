@@ -51,6 +51,8 @@ files_softpipe = files(
   'sp_texture.h',
   'sp_tile_cache.c',
   'sp_tile_cache.h',
+  'sp_trace.c',
+  'sp_trace.h',
 )
 
 libsoftpipe = static_library(

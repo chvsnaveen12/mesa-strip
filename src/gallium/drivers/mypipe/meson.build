@@ -39,3 +39,14 @@ driver_mypipe = declare_dependency(
     compile_args : '-DGALLIUM_MYPIPE',
     link_with : libmypipe,
 )
+
+# Trace replay tool — links against libmypipe + NIR for deserializing
+# and running mypipe's real vertex pipeline on captured softpipe traces.
+executable(
+    'mp_replay',
+    'replay/replay.c',
+    include_directories : [inc_gallium_aux, inc_gallium, inc_include, inc_src],
+    link_with : [libmypipe, libgallium],
+    dependencies : [idep_nir, idep_mesautil],
+    install : false,
+)

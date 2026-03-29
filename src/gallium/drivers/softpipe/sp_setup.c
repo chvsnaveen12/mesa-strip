@@ -38,6 +38,7 @@
 #include "sp_quad_pipe.h"
 #include "sp_setup.h"
 #include "sp_state.h"
+#include "sp_trace.h"
 #include "draw/draw_context.h"
 #include "pipe/p_shader_tokens.h"
 #include "util/u_math.h"
@@ -752,6 +753,11 @@ sp_setup_tri(struct setup_context *setup,
    float det;
    uint layer = 0;
    unsigned viewport_index = 0;
+
+   /* ── trace: stash this triangle's screen-space vertices ── */
+   if (sp_trace_active(setup->softpipe))
+      sp_trace_stash_triangle(setup->softpipe, v0, v1, v2);
+
 #if DEBUG_VERTS
    debug_printf("Setup triangle:\n");
    print_vertex(setup, v0);

@@ -12,7 +12,7 @@ static int mp_type_size(const struct glsl_type *type, bool bindless) {
     return glsl_count_attribute_slots(type, false);
 }
 
-static void mp_lower_and_compile(struct mp_compiled_shader *shader) {
+void mp_lower_and_compile(struct mp_compiled_shader *shader) {
     nir_shader *nir = shader->nir;
     if (!nir) return;
 

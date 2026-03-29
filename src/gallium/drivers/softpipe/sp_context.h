@@ -188,6 +188,18 @@ struct softpipe_context {
     * of sp_sampler_view?
     */
    struct softpipe_tex_tile_cache *tex_cache[MESA_SHADER_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
+
+   /** Trace capture state (active when SP_TRACE env is set) */
+   struct {
+      FILE *fp;               /**< trace file, NULL when tracing disabled */
+      uint32_t draw_num;      /**< running draw-call counter */
+      /* Accumulates triangles from sp_setup_tri calls */
+      float *tri_buf;         /**< triangle vertex data: 3 verts per tri,
+                                   each vert = num_attribs * 4 floats */
+      unsigned tri_buf_cap;   /**< allocated capacity in floats */
+      unsigned tri_buf_used;  /**< used floats so far */
+      unsigned tri_count;     /**< number of complete triangles */
+   } trace;
 };
 
 

@@ -437,7 +437,7 @@ void mp_rasterize_triangle(struct mypipe_context *mypipe,
                            const struct mp_vertex *v1,
                            const struct mp_vertex *v2,
                            struct mp_framebuffer *fb) {
-    /* Signed area of triangle (2x).  Positive = CCW, negative = CW. */
+    /* Signed area of triangle (2x) using edge function */
     float area = edge_func(v0->pos[0], v0->pos[1],
                            v1->pos[0], v1->pos[1],
                            v2->pos[0], v2->pos[1]);
@@ -446,9 +446,19 @@ void mp_rasterize_triangle(struct mypipe_context *mypipe,
 
     float inv_area = 1.0f / area;
 
-    /* Determine front-facing */
+    /* Determine front-facing using draw module's convention:
+     *   det = (v0-v2) x (v1-v2)
+     *   ccw = (det < 0)
+     *   face = (ccw == front_ccw) ? FRONT : BACK
+     */
+    float ex = v0->pos[0] - v2->pos[0];
+    float ey = v0->pos[1] - v2->pos[1];
+    float fx = v1->pos[0] - v2->pos[0];
+    float fy = v1->pos[1] - v2->pos[1];
+    float det = ex * fy - ey * fx;
     bool front_ccw = mypipe->rasterizer ? mypipe->rasterizer->front_ccw : false;
-    bool front_face = front_ccw ? (area > 0) : (area < 0);
+    unsigned ccw = (det < 0);
+    bool front_face = (ccw == (unsigned)front_ccw);
 
     /* Polygon offset (depth bias) */
     float depth_offset = 0.0f;

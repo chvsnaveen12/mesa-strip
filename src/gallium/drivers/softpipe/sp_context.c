@@ -51,6 +51,7 @@
 #include "sp_query.h"
 #include "sp_screen.h"
 #include "sp_tex_sample.h"
+#include "sp_trace.h"
 
 #include "nir.h"
 
@@ -59,6 +60,8 @@ softpipe_destroy( struct pipe_context *pipe )
 {
    struct softpipe_context *softpipe = softpipe_context( pipe );
    uint i, sh;
+
+   sp_trace_fini(softpipe);
 
    if (softpipe->blitter) {
       util_blitter_destroy(softpipe->blitter);
@@ -318,6 +321,8 @@ softpipe_create_context(struct pipe_screen *screen,
    draw_wide_point_sprites(softpipe->draw, true);
 
    sp_init_surface_functions(softpipe);
+
+   sp_trace_init(softpipe);
 
    return &softpipe->pipe;
 

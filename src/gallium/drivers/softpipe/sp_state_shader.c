@@ -32,6 +32,7 @@
 #include "sp_texture.h"
 
 #include "nir.h"
+#include "nir_serialize.h"
 #include "nir/nir_to_tgsi.h"
 #include "pipe/p_defines.h"
 #include "util/ralloc.h"
@@ -239,6 +240,18 @@ softpipe_create_vs_state(struct pipe_context *pipe,
    if (!state)
       goto fail;
 
+   /* Serialize NIR before it gets consumed by nir_to_tgsi (for trace capture) */
+   if (templ->type == PIPE_SHADER_IR_NIR && templ->ir.nir) {
+      struct blob blob;
+      blob_init(&blob);
+      nir_serialize(&blob, templ->ir.nir, false);
+      state->nir_blob_data = malloc(blob.size);
+      state->nir_blob_size = blob.size;
+      if (state->nir_blob_data)
+         memcpy(state->nir_blob_data, blob.data, blob.size);
+      blob_finish(&blob);
+   }
+
    softpipe_create_shader_state(pipe, &state->shader, templ,
                                 sp_debug & SP_DBG_VS);
    if (!state->shader.tokens)
@@ -285,6 +298,7 @@ softpipe_delete_vs_state(struct pipe_context *pipe, void *vs)
 
    draw_delete_vertex_shader(softpipe->draw, state->draw_data);
    tgsi_free_tokens(state->shader.tokens);
+   free(state->nir_blob_data);
    FREE( state );
 }
 

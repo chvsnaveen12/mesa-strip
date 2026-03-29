@@ -42,6 +42,7 @@
 #include "sp_state.h"
 #include "sp_texture.h"
 #include "sp_screen.h"
+#include "sp_trace.h"
 
 #include "draw/draw_context.h"
 
@@ -140,6 +141,10 @@ softpipe_draw_vbo(struct pipe_context *pipe,
    draw_collect_pipeline_statistics(draw,
                                     sp->active_statistics_queries > 0);
 
+   /* ── trace: capture inputs before draw ── */
+   if (sp_trace_active(sp))
+      sp_trace_capture_inputs(sp, info, &draws[0]);
+
    /* draw! */
    draw_vbo(draw, info, drawid_offset, indirect, draws, num_draws, 0);
 
@@ -162,6 +167,10 @@ softpipe_draw_vbo(struct pipe_context *pipe,
     * internally when this condition is seen?)
     */
    draw_flush(draw);
+
+   /* ── trace: capture reference output after draw completes ── */
+   if (sp_trace_active(sp))
+      sp_trace_capture_outputs(sp);
 
    /* Note: leave drawing surfaces mapped */
    sp->dirty_render_cache = true;

@@ -58,4 +58,7 @@ static inline struct mypipe_context * mypipe_context(struct pipe_context * pipe)
 
 struct pipe_context *mypipe_create_context(struct pipe_screen * , void *priv, unsigned int flags);
 
+/* Compile a NIR shader for the mypipe interpreter */
+void mp_lower_and_compile(struct mp_compiled_shader *shader);
+
 #endif
