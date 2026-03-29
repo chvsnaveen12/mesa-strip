@@ -80,10 +80,10 @@ static bool mypipe_resource_layout(struct pipe_screen * screen, struct mypipe_re
 static struct pipe_resource * mypipe_resource_create_front(struct pipe_screen *screen,
                                                             const struct pipe_resource *templat,
                                                             const void *map_from_private){
-    fprintf(stderr, "mypipe_resource_create_front: target=%d format=%s(%d) %dx%dx%d bind=[%s]\n",
+    fprintf(stderr, "mypipe_resource_create_front: target=%d format=%s(%d) %dx%dx%d last_level=%d bind=[%s]\n",
             templat->target, util_format_name(templat->format), templat->format,
             templat->width0, templat->height0, templat->depth0,
-            pipe_bind_str(templat->bind));
+            templat->last_level, pipe_bind_str(templat->bind));
 
     struct mypipe_resource *mpr = CALLOC_STRUCT(mypipe_resource);
     if(!mpr)

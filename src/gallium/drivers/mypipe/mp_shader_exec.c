@@ -135,25 +135,49 @@ static void sample_texture_2d(const struct mypipe_context *ctx,
         fetch_texel(dt_data, mpr->stride[0], view->format, ix, iy, w, h, out);
         winsys->displaytarget_unmap(winsys, mpr->dt);
     } else {
-        /* Compute LOD from screen-space derivatives */
-        unsigned last_level = view->texture->last_level;
-        unsigned level = 0;
+        /* Compute LOD matching softpipe (compute_lambda_2d_explicit_gradients) */
+        int last_level = (int)view->texture->last_level;
+        float lambda = 0.0f;
 
         if (last_level > 0) {
             float w0 = (float)view->texture->width0;
             float h0 = (float)view->texture->height0;
-            float dudx = dsdx * w0, dudy = dsdy * w0;
-            float dvdx = dtdx * h0, dvdy = dtdy * h0;
-            float rho_x = sqrtf(dudx * dudx + dvdx * dvdx);
-            float rho_y = sqrtf(dudy * dudy + dvdy * dvdy);
-            float rho = fmaxf(rho_x, rho_y);
-            if (rho > 1.0f) {
-                float lod = log2f(rho);
-                level = (unsigned)CLAMP((int)(lod + 0.5f), 0, (int)last_level);
-            }
+            float maxx = fmaxf(fabsf(dsdx), fabsf(dsdy)) * w0;
+            float maxy = fmaxf(fabsf(dtdx), fabsf(dtdy)) * h0;
+            float rho = fmaxf(maxx, maxy);
+            if (rho > 0.0f)
+                lambda = log2f(rho);
         }
 
-        sample_texture_2d_level(mpr, view, samp, level, s, t, out);
+        /* Mip filter dispatch matching softpipe's mip_filter_* functions */
+        if (samp->min_mip_filter == PIPE_TEX_MIPFILTER_NONE || last_level == 0) {
+            /* No mipmapping — use base level */
+            sample_texture_2d_level(mpr, view, samp, 0, s, t, out);
+        } else if (samp->min_mip_filter == PIPE_TEX_MIPFILTER_NEAREST) {
+            /* Nearest mip: softpipe's mip_filter_nearest */
+            if (lambda <= 0.0f) {
+                sample_texture_2d_level(mpr, view, samp, 0, s, t, out);
+            } else {
+                int level = CLAMP((int)(lambda + 0.5f), 0, last_level);
+                sample_texture_2d_level(mpr, view, samp, level, s, t, out);
+            }
+        } else {
+            /* Linear mip (trilinear): softpipe's mip_filter_linear
+             * Sample two adjacent levels and blend */
+            if (lambda <= 0.0f) {
+                sample_texture_2d_level(mpr, view, samp, 0, s, t, out);
+            } else if ((int)lambda >= last_level) {
+                sample_texture_2d_level(mpr, view, samp, last_level, s, t, out);
+            } else {
+                int level0 = (int)lambda;
+                float blend = lambda - (float)level0;
+                float out0[4], out1[4];
+                sample_texture_2d_level(mpr, view, samp, level0, s, t, out0);
+                sample_texture_2d_level(mpr, view, samp, level0 + 1, s, t, out1);
+                for (int c = 0; c < 4; c++)
+                    out[c] = out0[c] + blend * (out1[c] - out0[c]);
+            }
+        }
     }
 
     /* Apply swizzle from sampler view */
@@ -809,14 +833,16 @@ void mp_run_fs(const struct mp_compiled_shader *shader,
     if (num_varyings == 0)
         num_varyings = MP_MAX_VARYINGS;
 
-    /* Pre-compute per-quad varying derivatives from the 2x2 quad.
-     * pixel 0=(x,y), 1=(x+1,y), 2=(x,y+1), 3=(x+1,y+1)
-     * dFdx = pixel1 - pixel0,  dFdy = pixel2 - pixel0 */
+    /* Compute per-quad varying derivatives from finite differences,
+     * matching softpipe's tgsi_exec micro_ddx/micro_ddy:
+     *   ddx = pixel[3] - pixel[2]  (bottom_right - bottom_left)
+     *   ddy = pixel[2] - pixel[0]  (bottom_left - top_left)
+     * Layout: 0=top_left, 1=top_right, 2=bottom_left, 3=bottom_right */
     float dvdx[MP_MAX_VARYINGS][4];
     float dvdy[MP_MAX_VARYINGS][4];
     for (unsigned v = 0; v < num_varyings; v++) {
         for (int c = 0; c < 4; c++) {
-            dvdx[v][c] = quad->varyings[v][1][c] - quad->varyings[v][0][c];
+            dvdx[v][c] = quad->varyings[v][3][c] - quad->varyings[v][2][c];
             dvdy[v][c] = quad->varyings[v][2][c] - quad->varyings[v][0][c];
         }
     }
