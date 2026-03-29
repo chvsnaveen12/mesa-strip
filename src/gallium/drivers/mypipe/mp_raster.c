@@ -456,8 +456,10 @@ void mp_rasterize_triangle(struct mypipe_context *mypipe,
     float fx = v1->pos[0] - v2->pos[0];
     float fy = v1->pos[1] - v2->pos[1];
     float det = ex * fy - ey * fx;
+
     bool front_ccw = mypipe->rasterizer ? mypipe->rasterizer->front_ccw : false;
-    bool front_face = front_ccw ? (area > 0) : (area < 0);
+    unsigned ccw = (det < 0);
+    bool front_face = (ccw == (unsigned)front_ccw);
 
     /* Polygon offset (depth bias) */
     float depth_offset = 0.0f;
