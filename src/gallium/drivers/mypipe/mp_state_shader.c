@@ -50,6 +50,27 @@ void mp_lower_and_compile(struct mp_compiled_shader *shader) {
         }
     }
 
+    /* Compute FS input base offset: count system-value input slots
+     * (POS, FACE) so we can adjust load_input base for user varyings */
+    shader->fs_input_base_offset = 0;
+    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+        nir_foreach_function_impl(impl2, nir) {
+            nir_foreach_block(block2, impl2) {
+                nir_foreach_instr(instr2, block2) {
+                    if (instr2->type != nir_instr_type_intrinsic) continue;
+                    nir_intrinsic_instr *si = nir_instr_as_intrinsic(instr2);
+                    if (si->intrinsic != nir_intrinsic_load_input) continue;
+                    unsigned loc = nir_intrinsic_io_semantics(si).location;
+                    if (loc == VARYING_SLOT_POS || loc == VARYING_SLOT_FACE) {
+                        unsigned base = nir_intrinsic_base(si) + 1;
+                        if (base > shader->fs_input_base_offset)
+                            shader->fs_input_base_offset = base;
+                    }
+                }
+            }
+        }
+    }
+
     fprintf(stderr, "  mp_lower_and_compile: %u hw regs allocated\n", shader->num_regs);
 }
 

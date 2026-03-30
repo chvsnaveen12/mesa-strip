@@ -17,6 +17,9 @@ struct mp_compiled_shader {
     nir_shader *nir;
     unsigned num_regs;        /* hw register count after out-of-SSA */
     int reg_map[128];         /* decl_reg def.index -> compact hw reg ID */
+    unsigned fs_input_base_offset; /* system-value input slots (POS, FACE)
+                                    * preceding user varyings in nir_lower_io
+                                    * base numbering */
 };
 
 struct mypipe_context {
