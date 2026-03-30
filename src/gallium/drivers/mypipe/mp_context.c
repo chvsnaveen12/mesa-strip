@@ -19,6 +19,8 @@
 static void mypipe_destroy(struct pipe_context *pipe){
     fprintf(stderr, "mypipe_destroy\n");
     struct mypipe_context *mypipe = mypipe_context(pipe);
+    if (mypipe->blitter)
+        util_blitter_destroy(mypipe->blitter);
     if (mypipe->pipe.stream_uploader)
         u_upload_destroy(mypipe->pipe.stream_uploader);
     pipe_resource_reference(&mypipe->vs_cbuf.buffer, NULL);
@@ -32,11 +34,38 @@ static void mypipe_draw_vbo(struct pipe_context *pipe,
                             const struct pipe_draw_indirect_info *indirect,
                             const struct pipe_draw_start_count_bias *draws,
                             unsigned num_draws){
-    fprintf(stderr, "mypipe_draw_vbo: mode=%u num_draws=%u", info->mode, num_draws);
-    for (unsigned i = 0; i < num_draws; i++)
-        fprintf(stderr, " draw[%u]={start=%u count=%u}", i, draws[i].start, draws[i].count);
-    fprintf(stderr, " indexed=%d\n", info->index_size > 0);
-    mypipe_do_draw_vbo(mypipe_context(pipe), info, draws, num_draws);
+    struct mypipe_context *ctx = mypipe_context(pipe);
+    static int draw_num = 0;
+    fprintf(stderr, "MP_DRAW[%d]: mode=%u start=%u count=%u idx_sz=%u inst=%u\n",
+            draw_num, info->mode, draws[0].start, draws[0].count,
+            info->index_size, info->instance_count);
+    fprintf(stderr, "  FB: %ux%u nr_cbufs=%u\n",
+            ctx->framebuffer.width, ctx->framebuffer.height,
+            ctx->framebuffer.nr_cbufs);
+    for (unsigned c = 0; c < ctx->framebuffer.nr_cbufs; c++) {
+        if (ctx->framebuffer.cbufs[c].texture)
+            fprintf(stderr, "  cbuf[%u]: fmt=%u tex=%p\n", c,
+                    ctx->framebuffer.cbufs[c].format,
+                    (void*)ctx->framebuffer.cbufs[c].texture);
+    }
+    for (unsigned s = 0; s < MP_MAX_SAMPLERS; s++) {
+        struct pipe_sampler_view *v = ctx->sampler_views[MESA_SHADER_FRAGMENT][s];
+        if (v && v->texture) {
+            struct mypipe_resource *mpr = mypipe_resource(v->texture);
+            fprintf(stderr, "  FS sampler[%u]: fmt=%u view_fmt=%u %ux%u data=%p dt=%p swz=%u/%u/%u/%u\n",
+                    s, v->texture->format, v->format,
+                    v->texture->width0, v->texture->height0,
+                    mpr->data, (void*)mpr->dt,
+                    v->swizzle_r, v->swizzle_g, v->swizzle_b, v->swizzle_a);
+        }
+    }
+    if (ctx->blend)
+        fprintf(stderr, "  blend: en=%u src=%u dst=%u\n",
+                ctx->blend->rt[0].blend_enable,
+                ctx->blend->rt[0].rgb_src_factor,
+                ctx->blend->rt[0].rgb_dst_factor);
+    draw_num++;
+    mypipe_do_draw_vbo(ctx, info, draws, num_draws);
 }
 
 static void mypipe_clear(struct pipe_context *pipe,
@@ -167,6 +196,10 @@ static void mypipe_flush(struct pipe_context *pipe,
                          struct pipe_fence_handle **fence,
                          unsigned flags){
     fprintf(stderr, "mypipe_flush\n");
+    /* Software driver — everything is synchronous. But callers that pass
+     * a non-NULL fence expect a valid handle back (e.g. eglSwapBuffers). */
+    if (fence)
+        *fence = (struct pipe_fence_handle *)(uintptr_t)1;
 }
 
 static void mypipe_set_framebuffer_state(struct pipe_context *pipe,
@@ -232,6 +265,14 @@ struct pipe_context *mypipe_create_context(struct pipe_screen *screen, void *pri
 
     mypipe->pipe.stream_uploader = u_upload_create_default(&mypipe->pipe);
     mypipe->pipe.const_uploader = mypipe->pipe.stream_uploader;
+
+    mypipe->blitter = util_blitter_create(&mypipe->pipe);
+    if (!mypipe->blitter) {
+        fprintf(stderr, "mypipe: failed to create blitter\n");
+        mypipe_destroy(&mypipe->pipe);
+        return NULL;
+    }
+    util_blitter_cache_all_shaders(mypipe->blitter);
 
     return &mypipe->pipe;
 }

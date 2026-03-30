@@ -4,6 +4,8 @@
 #include "frontend/sw_winsys.h"
 #include "util/u_memory.h"
 #include "util/u_screen.h"
+#include "util/format/u_format.h"
+#include "pipe/p_defines.h"
 
 #include "mp_public.h"
 #include "mp_screen.h"
@@ -57,175 +59,68 @@ static bool mypipe_is_format_supported(struct pipe_screen *screen,
                                        unsigned int sample_count,
                                        unsigned int storage_sample_count,
                                        unsigned int bind){
-    if(sample_count > 1)
-        return false;
+    struct sw_winsys *winsys = mypipe_screen(screen)->winsys;
+    const struct util_format_description *format_desc;
 
-    if(target != PIPE_BUFFER && target != PIPE_TEXTURE_2D &&
-       target != PIPE_TEXTURE_CUBE && target != PIPE_TEXTURE_RECT)
-        return false;
+    assert(target == PIPE_BUFFER ||
+           target == PIPE_TEXTURE_1D ||
+           target == PIPE_TEXTURE_1D_ARRAY ||
+           target == PIPE_TEXTURE_2D ||
+           target == PIPE_TEXTURE_2D_ARRAY ||
+           target == PIPE_TEXTURE_RECT ||
+           target == PIPE_TEXTURE_3D ||
+           target == PIPE_TEXTURE_CUBE ||
+           target == PIPE_TEXTURE_CUBE_ARRAY);
 
-    /* Strip display/scanout/shared — check with winsys, then check remaining */
-    unsigned check = bind;
-    if(check & (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED)){
-        struct sw_winsys *winsys = mypipe_screen(screen)->winsys;
-        if(!winsys->is_displaytarget_format_supported(winsys, bind, format))
-            return false;
-        check &= ~(PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED);
-        if (!check)
-            return true;
+    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
+       return false;
+
+    format_desc = util_format_description(format);
+
+    if (sample_count > 1)
+       return false;
+
+    if (bind & (PIPE_BIND_DISPLAY_TARGET |
+                PIPE_BIND_SCANOUT |
+                PIPE_BIND_SHARED)) {
+       if(!winsys->is_displaytarget_format_supported(winsys, bind, format))
+          return false;
     }
 
-    /* Check each remaining bind flag — format must pass ALL */
-    if(check & PIPE_BIND_RENDER_TARGET){
-        switch (format){
-            case PIPE_FORMAT_B8G8R8A8_UNORM:
-            case PIPE_FORMAT_B8G8R8X8_UNORM:
-            case PIPE_FORMAT_R8G8B8A8_UNORM:
-            case PIPE_FORMAT_R8G8B8X8_UNORM:
-                check &= ~PIPE_BIND_RENDER_TARGET;
-                break;
-            default:
-                return false;
-        }
+    if (bind & PIPE_BIND_RENDER_TARGET) {
+       if (format_desc->colorspace == UTIL_FORMAT_COLORSPACE_ZS)
+          return false;
+
+       if (format_desc->block.width != 1 ||
+           format_desc->block.height != 1)
+          return false;
     }
-    if(check & PIPE_BIND_DEPTH_STENCIL){
-        switch(format){
-            case PIPE_FORMAT_Z24_UNORM_S8_UINT:
-            case PIPE_FORMAT_S8_UINT_Z24_UNORM:
-            case PIPE_FORMAT_Z24X8_UNORM:
-            case PIPE_FORMAT_X8Z24_UNORM:
-            case PIPE_FORMAT_Z16_UNORM:
-            case PIPE_FORMAT_Z32_FLOAT:
-            case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
-            case PIPE_FORMAT_S8_UINT:
-                check &= ~PIPE_BIND_DEPTH_STENCIL;
-                break;
-            default:
-                return false;
-        }
+
+    if (bind & PIPE_BIND_DEPTH_STENCIL) {
+       if (format_desc->colorspace != UTIL_FORMAT_COLORSPACE_ZS)
+          return false;
     }
-    if(check & PIPE_BIND_SAMPLER_VIEW){
-        switch (format){
-            /* Color formats */
-            case PIPE_FORMAT_B8G8R8A8_UNORM:
-            case PIPE_FORMAT_B8G8R8X8_UNORM:
-            case PIPE_FORMAT_R8G8B8A8_UNORM:
-            case PIPE_FORMAT_R8G8B8X8_UNORM:
-            case PIPE_FORMAT_R8_UNORM:
-            case PIPE_FORMAT_R8G8_UNORM:
-            case PIPE_FORMAT_A8_UNORM:
-            case PIPE_FORMAT_L8_UNORM:
-            case PIPE_FORMAT_L8A8_UNORM:
-            case PIPE_FORMAT_R32G32B32A32_FLOAT:
-            case PIPE_FORMAT_R32_FLOAT:
-            case PIPE_FORMAT_R32G32_FLOAT:
-            case PIPE_FORMAT_R32G32B32_FLOAT:
-            case PIPE_FORMAT_B8G8R8A8_SRGB:
-            case PIPE_FORMAT_R8G8B8A8_SRGB:
-            /* Depth formats as sampler view (shadow mapping, depth readback) */
-            case PIPE_FORMAT_Z24_UNORM_S8_UINT:
-            case PIPE_FORMAT_S8_UINT_Z24_UNORM:
-            case PIPE_FORMAT_Z24X8_UNORM:
-            case PIPE_FORMAT_X8Z24_UNORM:
-            case PIPE_FORMAT_Z16_UNORM:
-            case PIPE_FORMAT_Z32_FLOAT:
-            case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
-                check &= ~PIPE_BIND_SAMPLER_VIEW;
-                break;
-            default:
-                return false;
-        }
+
+    if (format_desc->layout == UTIL_FORMAT_LAYOUT_ASTC ||
+        format_desc->layout == UTIL_FORMAT_LAYOUT_ATC) {
+       return false;
     }
-    if(check & (PIPE_BIND_VERTEX_BUFFER | PIPE_BIND_CONSTANT_BUFFER | PIPE_BIND_INDEX_BUFFER))
-        return true;
 
-    /* If we checked at least one bind above and didn't return false, accept it.
-     * Unknown bind flags (BLENDABLE, LINEAR, etc.) are ignored — we're software. */
-    return (bind != check) || (bind == 0);
-//    struct sw_winsys *winsys = mypipe_screen(screen)->winsys;
-//    const struct util_format_description *format_desc;
+    if ((bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW)) &&
+        ((bind & PIPE_BIND_DISPLAY_TARGET) == 0) &&
+        target != PIPE_BUFFER) {
+       const struct util_format_description *desc =
+          util_format_description(format);
+       if (desc->nr_channels == 3 && desc->is_array) {
+          return false;
+       }
+    }
 
-//    assert(target == PIPE_BUFFER ||
-//           target == PIPE_TEXTURE_1D ||
-//           target == PIPE_TEXTURE_1D_ARRAY ||
-//           target == PIPE_TEXTURE_2D ||
-//           target == PIPE_TEXTURE_2D_ARRAY ||
-//           target == PIPE_TEXTURE_RECT ||
-//           target == PIPE_TEXTURE_3D ||
-//           target == PIPE_TEXTURE_CUBE ||
-//           target == PIPE_TEXTURE_CUBE_ARRAY);
+    if (format_desc->layout == UTIL_FORMAT_LAYOUT_ETC &&
+        format != PIPE_FORMAT_ETC1_RGB8)
+       return false;
 
-//    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
-//       return false;
-
-//    format_desc = util_format_description(format);
-
-//    if (sample_count > 1)
-//       return false;
-
-//    if (bind & (PIPE_BIND_DISPLAY_TARGET |
-//                PIPE_BIND_SCANOUT |
-//                PIPE_BIND_SHARED)) {
-//       if(!winsys->is_displaytarget_format_supported(winsys, bind, format))
-//          return false;
-//    }
-
-//    if (bind & PIPE_BIND_RENDER_TARGET) {
-//       if (format_desc->colorspace == UTIL_FORMAT_COLORSPACE_ZS)
-//          return false;
-
-//       /*
-//        * Although possible, it is unnatural to render into compressed or YUV
-//        * surfaces. So disable these here to avoid going into weird paths
-//        * inside gallium frontends.
-//        */
-//       if (format_desc->block.width != 1 ||
-//           format_desc->block.height != 1)
-//          return false;
-//    }
-
-//    if (bind & PIPE_BIND_DEPTH_STENCIL) {
-//       if (format_desc->colorspace != UTIL_FORMAT_COLORSPACE_ZS)
-//          return false;
-//    }
-
-//    if (format_desc->layout == UTIL_FORMAT_LAYOUT_ASTC ||
-//        format_desc->layout == UTIL_FORMAT_LAYOUT_ATC) {
-//       /* Software decoding is not hooked up. */
-//       return false;
-//    }
-
-//    if ((bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW)) &&
-//        ((bind & PIPE_BIND_DISPLAY_TARGET) == 0) &&
-//        target != PIPE_BUFFER) {
-//       const struct util_format_description *desc =
-//          util_format_description(format);
-//       if (desc->nr_channels == 3 && desc->is_array) {
-//          /* Don't support any 3-component formats for rendering/texturing
-//           * since we don't support the corresponding 8-bit 3 channel UNORM
-//           * formats.  This allows us to support GL_ARB_copy_image between
-//           * GL_RGB8 and GL_RGB8UI, for example.  Otherwise, we may be asked to
-//           * do a resource copy between PIPE_FORMAT_R8G8B8_UINT and
-//           * PIPE_FORMAT_R8G8B8X8_UNORM, for example, which will not work
-//           * (different bpp).
-//           */
-//          return false;
-//       }
-//    }
-
-//    if (format_desc->layout == UTIL_FORMAT_LAYOUT_ETC &&
-//        format != PIPE_FORMAT_ETC1_RGB8)
-//       return false;
-
-   /*
-    * All other operations (sampling, transfer, etc).
-    */
-
-   /*
-    * Everything else should be supported by u_format.
-    */
-//    return true;
-
+    return true;
 }
 
 static void mypipe_flush_frontbuffer(struct pipe_screen * _screen,
@@ -304,7 +199,7 @@ static void mypipe_init_shader_caps(struct mypipe_screen *screen){
         caps->integers = true;
         caps->max_texture_samplers = 8;
         caps->max_sampler_views = 8;
-        caps->supported_irs = 1 << PIPE_SHADER_IR_NIR;
+        caps->supported_irs = (1 << PIPE_SHADER_IR_NIR) | (1 << PIPE_SHADER_IR_TGSI);
         caps->max_shader_buffers = 0;
         caps->max_shader_images = 0;
     }

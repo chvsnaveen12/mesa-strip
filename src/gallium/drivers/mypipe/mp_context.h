@@ -4,6 +4,7 @@
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
 #include "nir/nir.h"
+#include "util/u_blitter.h"
 
 #define MP_MAX_ATTRIBS  16
 #define MP_MAX_SAMPLERS  8
@@ -53,6 +54,9 @@ struct mypipe_context {
     unsigned num_sampler_views[MESA_SHADER_STAGES];
     struct pipe_sampler_state *samplers[MESA_SHADER_STAGES][MP_MAX_SAMPLERS];
     unsigned num_samplers[MESA_SHADER_STAGES];
+
+    /* Blitter (for mipmap generation, scaled blits) */
+    struct blitter_context *blitter;
 };
 
 static inline struct mypipe_context * mypipe_context(struct pipe_context * pipe){

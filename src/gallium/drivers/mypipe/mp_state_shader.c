@@ -5,6 +5,7 @@
 #include "util/u_inlines.h"
 #include "compiler/nir/nir.h"
 #include "compiler/glsl_types.h"
+#include "nir/tgsi_to_nir.h"
 #include "mp_state.h"
 #include "mp_context.h"
 
@@ -29,6 +30,9 @@ void mp_lower_and_compile(struct mp_compiled_shader *shader) {
     /* Optimize */
     nir_opt_constant_folding(nir);
     nir_opt_dce(nir);
+
+    if (getenv("MP_DUMP_NIR"))
+        nir_print_shader(nir, stderr);
 
     /* Build register map: walk all blocks looking for decl_reg intrinsics */
     memset(shader->reg_map, -1, sizeof(shader->reg_map));
@@ -81,6 +85,12 @@ static void *mypipe_create_fs_state(struct pipe_context *pipe,
     if (templ->type == PIPE_SHADER_IR_NIR && templ->ir.nir) {
         shader->nir = templ->ir.nir;
         mp_lower_and_compile(shader);
+    } else if (templ->type == PIPE_SHADER_IR_TGSI && templ->tokens) {
+        shader->nir = tgsi_to_nir(templ->tokens, pipe->screen, false);
+        if (shader->nir)
+            mp_lower_and_compile(shader);
+        else
+            fprintf(stderr, "  tgsi_to_nir failed for FS\n");
     } else {
         fprintf(stderr, "  IR type: %d (not NIR)\n", templ->type);
     }
@@ -106,6 +116,12 @@ static void *mypipe_create_vs_state(struct pipe_context *pipe,
     if (templ->type == PIPE_SHADER_IR_NIR && templ->ir.nir) {
         shader->nir = templ->ir.nir;
         mp_lower_and_compile(shader);
+    } else if (templ->type == PIPE_SHADER_IR_TGSI && templ->tokens) {
+        shader->nir = tgsi_to_nir(templ->tokens, pipe->screen, false);
+        if (shader->nir)
+            mp_lower_and_compile(shader);
+        else
+            fprintf(stderr, "  tgsi_to_nir failed for VS\n");
     } else {
         fprintf(stderr, "  IR type: %d (not NIR)\n", templ->type);
     }

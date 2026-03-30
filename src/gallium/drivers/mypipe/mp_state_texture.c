@@ -4,12 +4,15 @@
 #include "mp_state.h"
 #include "mp_texture.h"
 #include "mp_screen.h"
+#include "mp_context.h"
 #include "mp_flush.h"
 
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_transfer.h"
 #include "util/u_surface.h"
+#include "util/u_blitter.h"
+#include "util/format/u_format.h"
 
 #include "frontend/sw_winsys.h"
 
@@ -244,7 +247,37 @@ static void mypipe_clear_texture(struct pipe_context *pipe,
 
 static void mypipe_blit(struct pipe_context *pipe,
                         const struct pipe_blit_info *info){
-    util_try_blit_via_copy_region(pipe, info, false);
+    struct mypipe_context *ctx = mypipe_context(pipe);
+
+    if (util_try_blit_via_copy_region(pipe, info, false))
+        return;
+
+    if (!util_blitter_is_blit_supported(ctx->blitter, info)) {
+        fprintf(stderr, "mypipe: blit unsupported %s -> %s\n",
+                util_format_short_name(info->src.resource->format),
+                util_format_short_name(info->dst.resource->format));
+        return;
+    }
+
+    util_blitter_save_vertex_buffers(ctx->blitter, ctx->vertex_buffers,
+                                     ctx->num_vertex_buffers);
+    util_blitter_save_vertex_elements(ctx->blitter, ctx->velems);
+    util_blitter_save_vertex_shader(ctx->blitter, ctx->vs);
+    util_blitter_save_rasterizer(ctx->blitter, ctx->rasterizer);
+    util_blitter_save_viewport(ctx->blitter, &ctx->viewport);
+    util_blitter_save_scissor(ctx->blitter, &ctx->scissor);
+    util_blitter_save_fragment_shader(ctx->blitter, ctx->fs);
+    util_blitter_save_blend(ctx->blitter, ctx->blend);
+    util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->depth_stencil);
+    util_blitter_save_stencil_ref(ctx->blitter, &ctx->stencil_ref);
+    util_blitter_save_framebuffer(ctx->blitter, &ctx->framebuffer);
+    util_blitter_save_fragment_sampler_states(ctx->blitter,
+                      ctx->num_samplers[MESA_SHADER_FRAGMENT],
+                      (void**)ctx->samplers[MESA_SHADER_FRAGMENT]);
+    util_blitter_save_fragment_sampler_views(ctx->blitter,
+                      ctx->num_sampler_views[MESA_SHADER_FRAGMENT],
+                      ctx->sampler_views[MESA_SHADER_FRAGMENT]);
+    util_blitter_blit(ctx->blitter, info, NULL);
 }
 
 void mypipe_init_context_texture_funcs(struct pipe_context *pipe){

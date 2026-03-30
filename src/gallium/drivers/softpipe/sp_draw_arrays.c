@@ -145,6 +145,40 @@ softpipe_draw_vbo(struct pipe_context *pipe,
    if (sp_trace_active(sp))
       sp_trace_capture_inputs(sp, info, &draws[0]);
 
+   /* ── debug: log draw call details ── */
+   {
+      static int draw_num = 0;
+      fprintf(stderr, "SP_DRAW[%d]: mode=%u start=%u count=%u idx_sz=%u inst=%u\n",
+              draw_num, info->mode, draws[0].start, draws[0].count,
+              info->index_size, info->instance_count);
+      fprintf(stderr, "  FB: %ux%u nr_cbufs=%u\n",
+              sp->framebuffer.width, sp->framebuffer.height,
+              sp->framebuffer.nr_cbufs);
+      for (unsigned c = 0; c < sp->framebuffer.nr_cbufs; c++) {
+         if (sp->framebuffer.cbufs[c].texture)
+            fprintf(stderr, "  cbuf[%u]: fmt=%u tex=%p\n", c,
+                    sp->framebuffer.cbufs[c].format,
+                    (void*)sp->framebuffer.cbufs[c].texture);
+      }
+      for (unsigned s = 0; s < sp->num_sampler_views[MESA_SHADER_FRAGMENT]; s++) {
+         struct pipe_sampler_view *v = sp->sampler_views[MESA_SHADER_FRAGMENT][s];
+         if (v && v->texture) {
+            struct softpipe_resource *spr = softpipe_resource(v->texture);
+            fprintf(stderr, "  FS sampler[%u]: fmt=%u view_fmt=%u %ux%u data=%p dt=%p swz=%u/%u/%u/%u\n",
+                    s, v->texture->format, v->format,
+                    v->texture->width0, v->texture->height0,
+                    spr->data, (void*)spr->dt,
+                    v->swizzle_r, v->swizzle_g, v->swizzle_b, v->swizzle_a);
+         }
+      }
+      if (sp->blend)
+         fprintf(stderr, "  blend: en=%u src=%u dst=%u\n",
+                 sp->blend->rt[0].blend_enable,
+                 sp->blend->rt[0].rgb_src_factor,
+                 sp->blend->rt[0].rgb_dst_factor);
+      draw_num++;
+   }
+
    /* draw! */
    draw_vbo(draw, info, drawid_offset, indirect, draws, num_draws, 0);
 
